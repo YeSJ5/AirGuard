@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: airguard_db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-airguard}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-airguard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: airguard_backend
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-airguard}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - POSTGRES_DB=${POSTGRES_DB:-airguard}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "8001:8001"
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8001"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: airguard_frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

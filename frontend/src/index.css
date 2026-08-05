@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    margin: 0;
+    font-family: 'Chivo Mono', monospace;
+    background-color: #05080f;
+    color: #cbd5e1;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Share Tech Mono', monospace;
+    color: #f1f5f9;
+  }
+}
+
+/* Custom Tactical Background Animations */
+.grid-overlay {
+  background-size: 40px 40px;
+  background-image: 
+    linear-gradient(to right, rgba(14, 116, 144, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(14, 116, 144, 0.05) 1px, transparent 1px);
+}
+
+.radar-sweep-effect {
+  background: conic-gradient(from 0deg at 50% 50%, rgba(6, 182, 212, 0.15) 0deg, transparent 90deg);
+  animation: radar-sweep 8s linear infinite;
+}
+
+@keyframes radar-sweep {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #090f1d;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #0ea5e9;
+}

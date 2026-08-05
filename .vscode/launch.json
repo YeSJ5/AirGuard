@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug FastAPI Backend",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "app.main:app",
+        "--reload",
+        "--port",
+        "8001"
+      ],
+      "cwd": "${workspaceFolder}/backend",
+      "jinja": true,
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "AirGuard: Launch Stack",
+      "configurations": [
+        "Debug FastAPI Backend"
+      ],
+      "preLaunchTask": "Run Frontend Dev"
+    }
+  ]
+}

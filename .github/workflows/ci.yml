@@ -1,0 +1,95 @@
+name: AirGuard CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backend-ci:
+    runs-on: ubuntu-latest
+    
+    services:
+      db:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: airguard
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+
+    - name: Install backend dependencies
+      run: |
+        cd backend
+        poetry install --no-interaction
+
+    - name: Lint backend (Ruff)
+      run: |
+        cd backend
+        poetry run ruff check app tests
+
+    - name: Verify formatting (Black)
+      run: |
+        cd backend
+        poetry run black --check app tests
+
+    - name: Run backend tests with coverage gate (80%)
+      env:
+        DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/airguard
+        LOG_LEVEL: INFO
+      run: |
+        cd backend
+        poetry run pytest --cov=app --cov-report=xml --cov-fail-under=80
+
+  frontend-ci:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: 'npm'
+        cache-dependency-path: frontend/package.json
+
+    - name: Install frontend dependencies
+      run: |
+        cd frontend
+        npm install
+
+    - name: Lint frontend (ESLint)
+      run: |
+        cd frontend
+        npm run lint
+
+    - name: Typecheck frontend (TypeScript)
+      run: |
+        cd frontend
+        npx tsc --noEmit
+
+    - name: Build frontend static assets
+      run: |
+        cd frontend
+        npm run build

@@ -1,0 +1,6 @@
+version: '3.8'
+
+services:
+  db:
+    ports:
+      - "5433:5432" # Copy this file to docker-compose.override.yml and modify this port if 5432 is already occupied on your host machine.
