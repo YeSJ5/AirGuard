@@ -181,7 +181,7 @@ export const InvestigationView: React.FC = () => {
               ruleRisk={detailData?.trust_status?.technical_details?.rule_risk}
               ensembleScore={detailData?.trust_status?.technical_details?.ensemble_score}
               autoencoderScore={detailData?.trust_status?.technical_details?.autoencoder_score}
-              spatialConsistency={detailData?.trust_status?.technical_details?.trilateration_score}
+              spatialConsistency={detailData?.trust_status?.technical_details?.receiver_consistency_score}
             />
 
             {/* Evidence Checklist & SHAP Breakdown */}

@@ -32,8 +32,8 @@ export const DetectionPipelineTiers: React.FC<DetectionPipelineTiersProps> = ({
     },
     {
       id: 2,
-      title: 'Tier 2: Supervised Ensemble',
-      subtitle: 'RF + GBDT soft voting with SHAP explainability',
+      title: 'Research ensemble',
+      subtitle: 'Disabled in live scoring unless explicitly enabled and loaded',
       icon: <Activity className="w-4 h-4 text-purple-400" />,
       score: ensembleScore,
       isTriggered: typeof ensembleScore === 'number' && ensembleScore >= 0.5,
@@ -41,8 +41,8 @@ export const DetectionPipelineTiers: React.FC<DetectionPipelineTiersProps> = ({
     },
     {
       id: 3,
-      title: 'Tier 3: PyTorch Autoencoder',
-      subtitle: 'Unsupervised deep reconstruction MSE error',
+      title: 'Research autoencoder',
+      subtitle: 'Unavailable until trained weights are supplied and enabled',
       icon: <Cpu className="w-4 h-4 text-emerald-400" />,
       score: autoencoderScore,
       isTriggered: typeof autoencoderScore === 'number' && autoencoderScore >= 0.5,
@@ -50,8 +50,8 @@ export const DetectionPipelineTiers: React.FC<DetectionPipelineTiersProps> = ({
     },
     {
       id: 4,
-      title: 'Tier 4: Multilateration Geometry',
-      subtitle: 'Independent receiver evidence, when available',
+      title: 'Tier 4: Spatial Receiver Consistency',
+      subtitle: 'Requires calibrated, synchronized receiver observations',
       icon: <Radio className="w-4 h-4 text-cyan-400" />,
       score: finalSpatial,
       isTriggered: typeof finalSpatial === 'number' && finalSpatial < 0.7,

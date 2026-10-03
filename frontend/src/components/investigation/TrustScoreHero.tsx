@@ -29,8 +29,8 @@ export const TrustScoreHero: React.FC<TrustScoreHeroProps> = ({
   const hasScore = typeof finalScore === 'number' && Number.isFinite(finalScore);
   const finalRisk = risk !== undefined ? risk : riskScore !== undefined ? riskScore : (hasScore ? (100 - finalScore) / 100 : undefined);
 
-  const isCritical = status === 'critical' || finalScore < 40;
-  const isSuspicious = status === 'suspicious' || (finalScore >= 40 && finalScore < 70);
+  const isCritical = status === 'critical' || (hasScore && finalScore < 40);
+  const isSuspicious = status === 'suspicious' || (hasScore && finalScore >= 40 && finalScore < 70);
 
   const getStatusColor = () => {
     if (isCritical) return 'text-red-400 border-red-500/30 bg-red-950/40';
@@ -101,7 +101,7 @@ export const TrustScoreHero: React.FC<TrustScoreHeroProps> = ({
               ? 'CRITICAL ANOMALY'
               : isSuspicious
               ? 'SUSPICIOUS SIGNAL'
-              : 'NO ACTIVE REVIEW FLAG'}
+              : hasScore ? 'NO ACTIVE REVIEW FLAG' : 'INSUFFICIENT EVIDENCE'}
           </Badge>
           {anomalyType && (
             <span className="text-xs font-mono text-red-300 max-w-xs text-left sm:text-right">

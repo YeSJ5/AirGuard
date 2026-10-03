@@ -77,6 +77,7 @@ services:
       - JAEGER_HOST=jaeger
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - RUN_INGESTION=true
+      - ENABLE_IN_PROCESS_DETECTION=false
       - OPENSKY_USERNAME=${OPENSKY_USERNAME:-}
       - OPENSKY_PASSWORD=${OPENSKY_PASSWORD:-}
       - OPENSKY_GLOBAL_VIEW=true
@@ -103,9 +104,10 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - JAEGER_HOST=jaeger
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ENABLE_IN_PROCESS_DETECTION=false
     command: python app/worker.py
     deploy:
-      replicas: 2
+      replicas: 1
     depends_on:
       db:
         condition: service_healthy

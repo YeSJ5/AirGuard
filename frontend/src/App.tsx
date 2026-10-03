@@ -38,7 +38,9 @@ const createReferenceBoundariesProvider = () => new UrlTemplateImageryProvider({
 
 
 const BACKEND_PORT = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BACKEND_PORT) || '8001';
-const HOSTNAME = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : '127.0.0.1';
+const HOSTNAME = typeof window !== 'undefined' && window.location?.hostname
+  ? (window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname)
+  : '127.0.0.1';
 const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_URL) || `http://${HOSTNAME}:${BACKEND_PORT}`;
 const WS_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_WS_URL) || `ws://${HOSTNAME}:${BACKEND_PORT}`;
 
@@ -238,9 +240,9 @@ const useStore = create<AirGuardState>((set) => ({
       durationSec: 8
     });
 
-    const calculatedTrust = payload.trust_score ?? (payload.combined_risk_score !== undefined ? Math.max(5, Math.min(100, Math.round((1.0 - payload.combined_risk_score) * 100))) : Number.NaN);
+    const calculatedTrust = payload.trust_score ?? (payload.combined_risk_score != null ? Math.max(5, Math.min(100, Math.round((1.0 - payload.combined_risk_score) * 100))) : Number.NaN);
     const calculatedStatus: 'normal' | 'suspicious' | 'critical' = 
-      payload.combined_risk_score !== undefined
+      payload.combined_risk_score != null
         ? (payload.combined_risk_score >= 0.8 ? 'critical' : payload.combined_risk_score >= 0.4 ? 'suspicious' : 'normal')
         : 'normal';
     
@@ -258,8 +260,8 @@ const useStore = create<AirGuardState>((set) => ({
         speed,
         heading,
         verticalRate: payload.vertical_rate_ms ?? existing.verticalRate,
-        trustScore: payload.trust_score !== undefined ? calculatedTrust : existing.trustScore,
-        status: payload.combined_risk_score !== undefined ? calculatedStatus : existing.status,
+        trustScore: payload.trust_score !== undefined || payload.combined_risk_score != null ? calculatedTrust : existing.trustScore,
+        status: payload.combined_risk_score != null ? calculatedStatus : existing.status,
         is_synthetic: isSynthetic,
         source: payload.source || (isSynthetic ? 'synthetic' : 'source_unavailable'),
         route: payload.route || existing.route || 'Route unknown',
@@ -802,7 +804,7 @@ const stopAmbientAtmosphere = (immediate: boolean = false) => {
 // --- App Component ---
 export default function App() {
   const { 
-    flights, selectedFlightId, alerts, websocketStatus, activeFilter,
+    flights, selectedFlightId, alerts, websocketStatus, backendHealth, activeFilter,
     setSelectedFlightId, setBackendHealth, setWebsocketStatus, setActiveFilter, addAlert,
     updateFlightStatus, updateOrAddFlight, acknowledgeAlert
   } = useStore();
@@ -1024,21 +1026,16 @@ export default function App() {
     });
   }, [showcaseMode, reduceMotion, selectedFlightId, isChaseFlying, isSoundEnabled, setSelectedFlightId]);
 
-  // Auth state - restore previous session or default to authenticated console session
+  // Restore a previously authenticated session. Never create a client-side identity.
   const [token, setToken] = useState<string | null>(() => {
-    return localStorage.getItem('airguard_token') || 'demo-token';
+    return localStorage.getItem('airguard_token');
   });
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('airguard_user');
     if (saved) {
       try { return JSON.parse(saved); } catch (e) { /* ignore */ }
     }
-    return {
-      id: 1,
-      email: "commander@airguard.sec",
-      role: "admin",
-      created_at: new Date().toISOString()
-    };
+    return null;
   });
   
   // Login form state
@@ -1046,6 +1043,25 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isRegistering, setIsRegistering] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const checkBackend = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
+        if (active) setBackendHealth(response.ok ? 'online' : 'offline');
+      } catch {
+        if (active) setBackendHealth('offline');
+      }
+    };
+    void checkBackend();
+    const interval = window.setInterval(checkBackend, 10000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [setBackendHealth]);
   
   // Admin page state
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
@@ -1079,6 +1095,18 @@ export default function App() {
       const formData = new URLSearchParams();
       formData.append("username", loginEmail);
       formData.append("password", loginPassword);
+
+      if (isRegistering) {
+        const registrationRes = await fetch(`${API_BASE}/api/v1/auth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: loginEmail, password: loginPassword })
+        });
+        if (!registrationRes.ok) {
+          const registrationError = await registrationRes.json().catch(() => ({}));
+          throw new Error(registrationError.detail || "Account registration failed.");
+        }
+      }
       
       const res = await fetch(`${API_BASE}/api/v1/auth/login`, {
         method: "POST",
@@ -1128,7 +1156,7 @@ export default function App() {
   };
 
   const fetchAdminData = async () => {
-    if (!token || token === "demo-token") return;
+    if (!token) return;
     try {
       const logsRes = await fetchWithAuth(`${API_BASE}/api/v1/admin/audit-logs${logFilterAction ? `?action=${logFilterAction}` : ''}`);
       if (logsRes.ok) {
@@ -1261,7 +1289,7 @@ export default function App() {
 
   // Fetch initial thresholds config
   useEffect(() => {
-    if (!token || token === "demo-token") return;
+    if (!token) return;
     const fetchConfig = async () => {
       try {
         const res = await fetchWithAuth(`${API_BASE}/api/v1/config`);
@@ -1290,8 +1318,12 @@ export default function App() {
     let reconnectDelay = 1000;
 
     const connect = () => {
-      // Dynamic auth token resolution: check localStorage, state ref, or fallback to demo-token
-      const activeToken = localStorage.getItem('airguard_token') || tokenRef.current || "demo-token";
+      // Dynamic auth token resolution: reconnects always use the current real session.
+      const activeToken = localStorage.getItem('airguard_token') || tokenRef.current;
+      if (!activeToken) {
+        setWebsocketStatus('disconnected');
+        return;
+      }
       setWebsocketStatus('connecting');
       socket = new WebSocket(`${WS_BASE}/api/v1/stream?token=${encodeURIComponent(activeToken)}`);
 
@@ -1994,8 +2026,8 @@ export default function App() {
 
   // Save config settings
   const handleSaveConfig = async () => {
-    if (token === "demo-token") {
-      alert("Config parameters saved successfully (Simulated mode).");
+    if (!token) {
+      alert("Sign in to save configuration changes.");
       return;
     }
     try {
@@ -2030,10 +2062,10 @@ export default function App() {
   // POST /api/v1/model-runs/replay trigger
   const handleReplaySession = async () => {
     setIsReplaying(true);
-    if (token === "demo-token") {
+    if (!token) {
       setReplayResult(null);
       setIsReplaying(false);
-      alert("Benchmark replay requires a backend session with labeled aircraft records. Demo mode does not contain validated benchmark results.");
+      alert("Sign in to run a replay against stored aircraft records.");
       return;
     }
     try {
@@ -2392,7 +2424,7 @@ export default function App() {
   // Trigger server-side alert acknowledgment
   const handleAcknowledge = async (id: string) => {
     acknowledgeAlert(id);
-    if (token === "demo-token") return;
+    if (!token) return;
     try {
       await fetchWithAuth(`${API_BASE}/api/v1/alerts/${id}/acknowledge`, { method: 'POST' });
     } catch (e) {
@@ -2515,6 +2547,11 @@ export default function App() {
               Airplanes broadcast unencrypted radio signals without authentication. AirGuard detects spoofing attempts by validating trajectory physics and ML trust scores in real time.
             </p>
           </div>
+
+          <div role="status" aria-live="polite" className={`mb-4 flex items-center gap-2 rounded border px-3 py-2 text-[11px] ${backendHealth === 'online' ? 'border-emerald-800 bg-emerald-950/30 text-emerald-300' : backendHealth === 'checking' ? 'border-slate-700 bg-slate-900/70 text-slate-400' : 'border-rose-900 bg-rose-950/30 text-rose-300'}`}>
+            <span className={`h-2 w-2 rounded-full ${backendHealth === 'online' ? 'bg-emerald-400' : backendHealth === 'checking' ? 'bg-slate-500' : 'bg-rose-400'}`} />
+            {backendHealth === 'online' ? 'Backend and database connected' : backendHealth === 'checking' ? 'Checking backend connection…' : 'Backend unavailable — start AirGuard services to sign in and view live aircraft'}
+          </div>
           
           {loginError && (
             <div className="mb-4 bg-rose-950/40 border border-rose-500/40 text-rose-400 text-[10px] p-2.5 rounded font-normal">
@@ -2552,9 +2589,17 @@ export default function App() {
               disabled={isLoggingIn}
               className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-black font-bold text-xs py-2.5 rounded transition-colors mt-2"
             >
-              {isLoggingIn ? "SIGNING IN..." : "SIGN IN TO CONSOLE"}
+              {isLoggingIn ? (isRegistering ? "CREATING ACCOUNT..." : "SIGNING IN...") : (isRegistering ? "CREATE VIEWER ACCOUNT" : "SIGN IN")}
             </button>
           </form>
+
+          <button
+            type="button"
+            onClick={() => { setIsRegistering((value) => !value); setLoginError(null); }}
+            className="mt-4 w-full text-xs text-sky-300 hover:text-white transition-colors"
+          >
+            {isRegistering ? "Already registered? Sign in" : "New to AirGuard? Create a viewer account"}
+          </button>
 
           <div className="mt-4 border-t border-slate-800/60 pt-3 text-center">
             <span className="text-[10px] text-slate-600 uppercase font-normal">
@@ -3371,7 +3416,7 @@ export default function App() {
                             ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700'
                             : 'bg-amber-950/90 text-amber-300 border-amber-700'
                         }`}>
-                          HTTP {healthData?.last_poll_http_status ?? 200}
+                          HTTP {healthData?.last_poll_http_status ?? '—'}
                         </span>
                       </div>
                     </div>
@@ -3380,7 +3425,7 @@ export default function App() {
                     <div className="p-2 bg-slate-900/80 rounded border border-slate-800/90 flex items-center justify-between">
                       <div className="flex flex-col">
                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">2. DETECTION PROCESSING</span>
-                        <span className="text-[9px] text-slate-500">Rules + Ensemble + Autoencoder</span>
+                        <span className="text-[9px] text-slate-500">Observed kinematic rules; research ML is disabled</span>
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-[12px] font-extrabold text-sky-300">

@@ -47,8 +47,8 @@ export const useAirGuardStore = create<AirGuardState>((set) => ({
   soundEnabled: false,
   currentUser: typeof window !== 'undefined' && localStorage.getItem('airguard_user') 
     ? JSON.parse(localStorage.getItem('airguard_user') || 'null') 
-    : { id: 1, email: 'operator@airguard.sec', role: 'admin' },
-  token: typeof window !== 'undefined' ? localStorage.getItem('airguard_token') || 'demo-token' : 'demo-token',
+    : null,
+  token: typeof window !== 'undefined' ? localStorage.getItem('airguard_token') : null,
 
   setFlights: (flights) => {
     const activeIcaos = new Set(flights.map(f => f.id));
@@ -74,15 +74,15 @@ export const useAirGuardStore = create<AirGuardState>((set) => ({
     const existingIndex = state.flights.findIndex((f: Flight) => f.id === payload.icao24);
     const altitudeFt = Math.round(payload.altitude_m * 3.28084);
     const speedKnots = Math.round(payload.velocity_ms * 1.94384);
-    const trustScore = payload.trust_score !== undefined 
+    const trustScore = payload.trust_score != null
       ? payload.trust_score 
-      : payload.combined_risk_score !== undefined 
+      : payload.combined_risk_score != null
         ? Math.max(5, Math.min(100, Math.round((1.0 - payload.combined_risk_score) * 100))) 
-        : 95;
+        : Number.NaN;
 
     const status: 'normal' | 'suspicious' | 'critical' = payload.is_alert_triggered 
       ? 'critical' 
-      : trustScore < 40 ? 'critical' : trustScore < 70 ? 'suspicious' : 'normal';
+      : Number.isFinite(trustScore) && trustScore < 40 ? 'critical' : Number.isFinite(trustScore) && trustScore < 70 ? 'suspicious' : 'normal';
 
     if (existingIndex >= 0) {
       const existing = state.flights[existingIndex];

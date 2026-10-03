@@ -17,15 +17,6 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
     token: str = Depends(reusable_oauth2)
 ) -> User:
-    if token in ("demo-token", "guest-token"):
-        try:
-            result = await db.execute(select(User).limit(1))
-            demo_user = result.scalar_one_or_none()
-            if demo_user:
-                return demo_user
-        except Exception:
-            pass
-        return User(id=1, email="admin@airguard.sec", role="admin")
     try:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
@@ -78,15 +69,6 @@ async def get_websocket_user(
     db: AsyncSession,
     token: str
 ) -> Optional[User]:
-    if token in ("demo-token", "guest-token", "anonymous"):
-        try:
-            result = await db.execute(select(User).limit(1))
-            user = result.scalar_one_or_none()
-            if user:
-                return user
-        except Exception:
-            pass
-        return User(id=1, email="demo@airguard.local", role="viewer")
     try:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]

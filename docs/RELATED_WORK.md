@@ -29,7 +29,7 @@ In recent years, several notable public, academic, and commercial initiatives ha
 
 - **How AirGuard differs**:  
   SkAI / ZHAW represents the closest and most sophisticated prior work to AirGuard, but key architectural differences define AirGuard's scope:
-  1. **Multi-Layer Hybrid Pipeline with Unsupervised Zero-Day Detection**: SkAI focuses on geometric pattern clustering and crowdsourced MLAT. AirGuard integrates four complementary defense tiers: deterministic kinematic boundary rules + a supervised gradient-boosted ensemble (Random Forest + GBDT) + a deep unsupervised PyTorch autoencoder (which detects out-of-distribution variance spikes without requiring labeled attack examples) + simulated receiver trilateration geometry.
+  1. **Evidence-first telemetry triage**: AirGuard currently evaluates limited kinematic rules on live state vectors. Research classifiers are unavailable in the live path unless explicitly enabled and a trained model is loaded; no receiver-based positioning evidence is available in the configured feed.
   2. **Explainable AI (XAI) with SHAP Attribution**: SkAI yields an incident-level classification or cluster flag. AirGuard computes local TreeExplainer SHAP values for every individual alert, attributing exact mathematical risk contributions to specific features (e.g., altitude rate vs. heading variance vs. self-reported NIC) so radar controllers receive glass-box justification rather than a black-box anomaly flag.
   3. **Continuous Rolling Trust Score vs. Event Trigger**: Rather than issuing discrete point-in-time alert flags, AirGuard maintains an exponentially smoothed rolling trust score ($0\text{--}100$) across an aircraft's active flight session. This visually and mathematically differentiates slow signal degradation (e.g., jamming or antenna masking) from sharp, instantaneous step discontinuities (e.g., coordinate injection).
   4. **Self-Contained Ground-Station Deployment**: SkAI operates as a centralized cloud service dependent on OpenSky's global terrestrial receiver network. AirGuard is designed as an autonomous, self-contained ground-station appliance that can be deployed by a single airport, base, or mobile radar unit on local hardware without reliance on external cloud infrastructure.
@@ -56,7 +56,7 @@ In recent years, several notable public, academic, and commercial initiatives ha
 | **Kinematic Physics Rules** | No | Secondary | No | **Yes** (Implied velocity, climb, ICAO) |
 | **Supervised Machine Learning** | No | Proprietary heuristics | No | **Yes** (Random Forest + GBDT) |
 | **Unsupervised Deep Learning** | No | No | No | **Yes** (PyTorch Autoencoder MSE) |
-| **Independent Receiver Cross-Check** | No | Yes (OpenSky MLAT) | No | **Yes** (Local Multi-Sensor Trilateration) |
+| **Independent Receiver Cross-Check** | No | Feed-dependent | No | **Unavailable in current deployment** |
 | **Explainable AI (XAI)** | No | No | No | **Yes** (Local TreeExplainer SHAP) |
 | **Temporal Trust Tracking** | No | No (Event-based) | No | **Yes** (Rolling 0–100 Trust History) |
 | **Deceptive Spoofing Detection** (Forged High NIC) | No (Bypassed) | Yes (via MLAT/Patterns) | No (Bypassed) | **Yes** (Kinematic + ML Variance) |
@@ -73,9 +73,9 @@ In recent years, several notable public, academic, and commercial initiatives ha
 > 1. **GPSJam.org (John Wiseman)** maps global GPS interference by aggregating the percentage of aircraft broadcasting degraded Navigation Integrity Category ($\text{NIC} < 7$) into daily hexagonal bins.  
 >    *How AirGuard differs*: GPSJam produces a 24-hour batch map based entirely on self-reported GPS accuracy. AirGuard operates in real time ($< 500\text{ ms}$) on individual aircraft state vectors, validating physical kinematics (implied velocity, climb limits) and detecting spoofed trajectories even when an attacker deceives the receiver by broadcasting a forged high NIC.
 > 
-> 2. **SkAI Data Services & Zurich University of Applied Sciences (ZHAW / GPSwise)** is the closest existing prior work, tracking live GPS spoofing on OpenSky Network data by identifying geometric trajectory anomalies (e.g., circular flight paths, multiple aircraft reporting identical coordinates) and verifying signals against OpenSky's global Multilateration (MLAT) receiver grid.  
+> 2. Prior work uses live aircraft telemetry and, where available, independent receiver observations. AirGuard's current deployment does not have a calibrated receiver network, so it limits conclusions to evidence in its configured source.
 >    *How AirGuard differs*: Rather than relying solely on geometric clustering and centralized MLAT, AirGuard introduces: (a) a four-layer hybrid defense combining deterministic physics rules, a supervised ensemble (RF + GBDT), and deep unsupervised autoencoders for zero-day variance detection; (b) local SHAP attribution explaining the exact feature contribution behind every alert; (c) a rolling session trust-score ($0\text{--}100$) distinguishing slow signal degradation from step injection; and (d) an autonomous, locally deployable ground-station architecture independent of global cloud aggregators.
 > 
 > 3. **commercial flight tracker GPS Jamming Map** provides a commercial situational awareness overlay displaying regional proportions of aircraft broadcasting low NIC/NACp accuracy over 6-hour and 24-hour windows.  
->    *How AirGuard differs*: commercial flight tracker offers a passive macro visualization without intrusion detection capabilities. AirGuard functions as an active radar intrusion detection system, applying multi-layer classification, multi-sensor trilateration plausibility checks, and automated forensic reporting.
+>    *How AirGuard differs*: AirGuard is being shaped as an evidence-led telemetry review and investigation tool. Its current detector uses a limited set of kinematic rules; it does not claim independent position verification or validated threat classification.
 

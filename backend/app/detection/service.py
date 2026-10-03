@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import numpy as np
 from typing import Any, Dict, List, Optional
 
-from app.models import AircraftState, Alert
+from app.models import AircraftAssessment, AircraftState, Alert
 from app.detection.rules import (
     RuleConfig,
     check_position_jump,
@@ -16,6 +16,7 @@ from app.detection.rules import (
     check_low_signal_confidence
 )
 from app.core.rule_config import active_rule_config
+from app.core.config import settings
 from app.detection.ensemble import FEATURE_NAMES, TrustScoringEnsemble
 from app.detection.autoencoder import (
     UnsupervisedAutoencoder,
@@ -120,13 +121,15 @@ class DetectionService:
         # --- 1. Evaluate Aerodynamic Rules ---
         rules_start = time.perf_counter()
         with tracer.start_as_current_span("evaluate_rules") as span:
-            rule_climb, climb_reason, climb_evidence = check_impossible_climb_rate(
-                record["vertical_rate_ms"], self.rule_config
-            )
-            rule_alt_vel, alt_vel_reason, alt_vel_evidence = check_altitude_velocity_mismatch(
-                record["altitude_m"], record["velocity_ms"], record["on_ground"], self.rule_config
-            )
-            rule_jump = False
+            quality = record.get("data_quality", {})
+            observed = set(quality.get("observed_fields", []))
+            rule_climb, climb_reason, climb_evidence = (None, None, {})
+            if "vertical_rate" in observed:
+                rule_climb, climb_reason, climb_evidence = check_impossible_climb_rate(record["vertical_rate_ms"], self.rule_config)
+            rule_alt_vel, alt_vel_reason, alt_vel_evidence = (None, None, {})
+            if {"altitude", "velocity", "on_ground"}.issubset(observed):
+                rule_alt_vel, alt_vel_reason, alt_vel_evidence = check_altitude_velocity_mismatch(record["altitude_m"], record["velocity_ms"], record["on_ground"], self.rule_config)
+            rule_jump = None
             jump_reason = None
             jump_evidence = {}
             if prev_record:
@@ -139,34 +142,20 @@ class DetectionService:
                     prev_time=prev_record["received_at"],
                     config=self.rule_config
                 )
-            rule_dup = False
+            # A historical state is not independent same-time evidence for an ICAO clone.
+            rule_dup = None
             dup_reason = None
             dup_evidence = {}
-            if prev_record:
-                rule_dup, dup_reason, dup_evidence = check_duplicate_icao(
-                    lat_a=record["latitude"], lon_a=record["longitude"], time_a=record["received_at"],
-                    lat_b=prev_record["latitude"], lon_b=prev_record["longitude"], time_b=prev_record["received_at"],
-                    config=self.rule_config
-                )
-            rule_low_signal = False
+            rule_low_signal = None
             low_signal_reason = None
             low_signal_evidence = {}
             reported_nic = record.get("reported_nic")
-            if prev_record:
+            # The public vector generally omits NIC; no observation means unassessed.
+            if reported_nic is not None:
                 rule_low_signal, low_signal_reason, low_signal_evidence = check_low_signal_confidence(
-                    reported_nic=reported_nic,
-                    current_lat=record["latitude"],
-                    current_lon=record["longitude"],
-                    prev_lat=prev_record["latitude"],
-                    prev_lon=prev_record["longitude"],
-                    config=self.rule_config
-                )
-            else:
-                rule_low_signal, low_signal_reason, low_signal_evidence = check_low_signal_confidence(
-                    reported_nic=reported_nic,
-                    current_lat=record["latitude"],
-                    current_lon=record["longitude"],
-                    config=self.rule_config
+                    reported_nic=reported_nic, current_lat=record["latitude"], current_lon=record["longitude"],
+                    prev_lat=prev_record["latitude"] if prev_record else None,
+                    prev_lon=prev_record["longitude"] if prev_record else None, config=self.rule_config
                 )
         rules_latency = time.perf_counter() - rules_start
         PIPELINE_STAGE_LATENCY.labels(stage="rules").observe(rules_latency)
@@ -176,52 +165,43 @@ class DetectionService:
 
         # Calculate Rolling Window Features
         states = [record] + prev_history[:4]
+        complete_window = len(states) >= 5 and all({"velocity", "heading", "vertical_rate"}.issubset(set(s.get("data_quality", {}).get("observed_fields", []))) for s in states)
         speeds = [s["velocity_ms"] for s in states]
         headings = [s["heading_deg"] for s in states]
         vert_rates = [s["vertical_rate_ms"] for s in states]
 
-        if len(speeds) > 1:
+        if complete_window:
             speed_var = float(np.var(speeds))
             heading_var = float(np.var(headings))
             alt_rate_var = float(np.var(vert_rates))
         else:
-            # Seed cold-start variance calibrated to nominal kinematic baseline
-            v_curr = float(record.get("velocity_ms") or 0.0)
-            h_curr = float(record.get("heading_deg") or 0.0)
-            vr_curr = float(record.get("vertical_rate_ms") or 0.0)
-            speed_var = float(min(1.5, ((v_curr * 0.0015) ** 2) + 0.05))
-            heading_var = float(min(3.0, (((h_curr % 360) * 0.003) ** 2) + 0.02))
-            alt_rate_var = float(min(1.0, ((abs(vr_curr) * 0.05) ** 2) + 0.01))
+            # A single/few observations cannot establish rolling behaviour variance.
+            speed_var = heading_var = alt_rate_var = None
 
-        time_diff = 1.0
-        if prev_record:
+        time_diff = None
+        if prev_record and speed_var is not None:
             time_diff = max(0.1, (record["received_at"] - prev_record["received_at"]).total_seconds())
 
-        feature_vector = np.array([
-            speed_var,
-            heading_var,
-            alt_rate_var,
-            time_diff,
-            float(rule_jump),
-            float(rule_dup),
-            float(rule_climb),
-            float(rule_alt_vel),
-            float(rule_low_signal)
-        ])
-
-        # --- 2. Evaluate ML models ---
-        ensemble_start = time.perf_counter()
-        with tracer.start_as_current_span("evaluate_ensemble") as span:
-            ensemble_score, shap_explanation = self.ensemble.predict_anomaly(feature_vector)
-        ensemble_latency = time.perf_counter() - ensemble_start
-        PIPELINE_STAGE_LATENCY.labels(stage="ensemble").observe(ensemble_latency)
-
-        ae_start = time.perf_counter()
-        with tracer.start_as_current_span("evaluate_autoencoder") as span:
-            ae_features = np.array([speed_var, heading_var, alt_rate_var, time_diff])
-            ae_score = self.autoencoder.compute_anomaly_score(ae_features)
-        ae_latency = time.perf_counter() - ae_start
-        PIPELINE_STAGE_LATENCY.labels(stage="autoencoder").observe(ae_latency)
+        ensemble_score = None
+        ae_score = None
+        shap_explanation = {"status": "unavailable", "reason": "Not enough observed history for rolling features."}
+        if settings.ENABLE_LIVE_ML and speed_var is not None and time_diff is not None and all(flag is not None for flag in rule_flags):
+            feature_vector = np.array([
+                speed_var, heading_var, alt_rate_var, time_diff,
+                float(rule_jump), float(rule_dup), float(rule_climb),
+                float(rule_alt_vel), float(rule_low_signal)
+            ])
+            if self.ensemble is not None:
+                ensemble_start = time.perf_counter()
+                with tracer.start_as_current_span("evaluate_ensemble"):
+                    ensemble_score, shap_explanation = self.ensemble.predict_anomaly(feature_vector)
+                PIPELINE_STAGE_LATENCY.labels(stage="ensemble").observe(time.perf_counter() - ensemble_start)
+            if self.autoencoder is not None:
+                ae_start = time.perf_counter()
+                with tracer.start_as_current_span("evaluate_autoencoder"):
+                    ae_features = np.array([speed_var, heading_var, alt_rate_var, time_diff])
+                    ae_score = self.autoencoder.compute_anomaly_score(ae_features)
+                PIPELINE_STAGE_LATENCY.labels(stage="autoencoder").observe(time.perf_counter() - ae_start)
 
         # Trilateration check
         tri_start = time.perf_counter()
@@ -230,7 +210,7 @@ class DetectionService:
             trilateration_score, tri_reason, tri_evidence = check_trilateration_plausibility(
                 record["latitude"], record["longitude"], sensors
             )
-            if tri_reason != "consistent" and tri_reason != "inconclusive":
+            if tri_reason not in {"consistent", "inconclusive", "unavailable"}:
                 reasons.append(tri_reason)
         tri_latency = time.perf_counter() - tri_start
         PIPELINE_STAGE_LATENCY.labels(stage="trilateration").observe(tri_latency)
@@ -251,25 +231,30 @@ class DetectionService:
             "rules_triggered": [FEATURE_NAMES[i + 4] for i, f in enumerate(rule_flags) if f],
             "ensemble_score": ensemble_score,
             "autoencoder_score": ae_score,
-            "trilateration_consistency": trilateration_score,
+            "receiver_consistency": trilateration_score,
             "is_known_entity": is_suppressed,
             "known_entity_label": known_label,
             "alert_triggered": bool(is_alert_triggered and not is_suppressed)
         }
 
-        trust_val = max(5, min(100, round((1.0 - combined_risk_score) * 100)))
+        # A rule/model blend is a triage signal, not a calibrated aircraft trust percentage.
+        # Keep trust unscored until a validated, source-matched assessment is available.
+        trust_val = None
         self.latest_scores[icao24] = {
-            "ensemble_score": float(ensemble_score),
-            "autoencoder_score": float(ae_score),
-            "trilateration_score": float(trilateration_score),
-            "combined_risk_score": float(combined_risk_score),
-            "trust_score": float(trust_val)
+            "ensemble_score": ensemble_score,
+            "autoencoder_score": ae_score,
+            "receiver_consistency_score": trilateration_score,
+            "combined_risk_score": combined_risk_score,
+            "trust_score": None,
+            "evidence_confidence": round((0.4 if any(flag is not None for flag in rule_flags) else 0.0) + (0.3 if ensemble_score is not None else 0.0) + (0.2 if ae_score is not None else 0.0) + (0.1 if trilateration_score is not None else 0.0), 2),
+            "assessment_status": "SUPPRESSED" if is_suppressed else "REVIEW_REQUIRED" if is_alert_triggered else "INSUFFICIENT_EVIDENCE"
         }
         logger.info(
             f"[SCORE_EVAL] {icao24} ({record.get('callsign')}): "
-            f"Ensemble={ensemble_score:.4f}, Autoencoder={ae_score:.4f}, "
-            f"Trilateration={trilateration_score:.4f}, CombinedRisk={combined_risk_score:.4f}, "
-            f"TrustScore={trust_val}%"
+            f"Ensemble={ensemble_score if ensemble_score is not None else 'UNAVAILABLE'}, "
+            f"Autoencoder={ae_score if ae_score is not None else 'UNAVAILABLE'}, "
+            f"ReceiverConsistency={trilateration_score if trilateration_score is not None else 'UNAVAILABLE'}, CombinedRisk={f'{combined_risk_score:.4f}' if combined_risk_score is not None else 'UNASSESSED'}, "
+            "TrustScore=UNASSESSED"
         )
 
         if is_suppressed:
@@ -277,16 +262,16 @@ class DetectionService:
                 json.dumps({
                     "event": "AUDIT_DECISION_SUPPRESSED",
                     "payload": audit_payload,
-                    "message": f"[AUDIT] Decision: SUPPRESSED for known entity {icao24} ({known_label}). Calculated risk: {combined_risk_score:.2f}."
+                    "message": f"[AUDIT] Decision: SUPPRESSED for known entity {icao24} ({known_label}). Calculated risk: {f'{combined_risk_score:.2f}' if combined_risk_score is not None else 'UNASSESSED'}."
                 })
             )
         else:
-            decision = "ALERT" if is_alert_triggered else "PASS"
+            decision = "ALERT" if is_alert_triggered else "INSUFFICIENT_EVIDENCE"
             logger.info(
                 json.dumps({
                     "event": f"AUDIT_DECISION_{decision}",
                     "payload": audit_payload,
-                    "message": f"[AUDIT] Decision: {decision} for aircraft {icao24}. Risk: {combined_risk_score:.2f}."
+                    "message": f"[AUDIT] Decision: {decision} for aircraft {icao24}. Risk: {f'{combined_risk_score:.2f}' if combined_risk_score is not None else 'UNASSESSED'}."
                 })
             )
 
@@ -312,13 +297,33 @@ class DetectionService:
                         received_at=record["received_at"],
                         source=record.get("source", "opensky"),
                         reported_nic=record.get("reported_nic"),
+                        data_quality=record.get("data_quality", {}),
                         is_synthetic=is_synthetic
                     )
                     session.add(db_state)
                     await session.commit()
+                    await session.refresh(db_state)
+                    state_id = db_state.id
+                    session.add(AircraftAssessment(
+                        aircraft_state_id=db_state.id,
+                        icao24=icao24,
+                        combined_risk_score=combined_risk_score,
+                        evidence_confidence=self.latest_scores[icao24]["evidence_confidence"],
+                        status=self.latest_scores[icao24]["assessment_status"],
+                        signals={
+                            "rule_flags": {"position_jump": rule_jump, "duplicate_icao": rule_dup, "climb_rate": rule_climb, "alt_vel_mismatch": rule_alt_vel, "low_signal_confidence": rule_low_signal},
+                            "ensemble_score": ensemble_score,
+                            "autoencoder_score": ae_score,
+                            "receiver_consistency": trilateration_score,
+                            "data_quality": record.get("data_quality", {}),
+                            "live_ml_enabled": settings.ENABLE_LIVE_ML,
+                        },
+                        detector_version="rules-v2",
+                        assessed_at=datetime.now(timezone.utc),
+                    ))
+                    await session.commit()
                     if is_alert_triggered and not is_suppressed:
-                        await session.refresh(db_state)
-                        state_id = db_state.id
+                        pass
             except Exception as e:
                 logger.error(f"Failed to record AircraftState to database: {e}")
 
@@ -370,11 +375,15 @@ class DetectionService:
                             "alt_vel_mismatch": alt_vel_evidence,
                             "low_signal_confidence": low_signal_evidence
                         },
-                        "trilateration": tri_evidence,
+                        "receiver_consistency": tri_evidence,
                         "model_scores": {
                             "ensemble_score": ensemble_score,
                             "autoencoder_score": ae_score
-                        }
+                        },
+                        "evidence_confidence": self.latest_scores[icao24]["evidence_confidence"],
+                        "assessment_status": self.latest_scores[icao24]["assessment_status"],
+                        "live_ml_enabled": settings.ENABLE_LIVE_ML,
+                        "trust_score": None
                     }
                     
                     async with self.db_session_maker() as session:
@@ -435,22 +444,18 @@ class DetectionService:
                     "is_synthetic": is_synthetic,
                     "source": record.get("source", "opensky"),
                     "route": route_text,
-                    "combined_risk_score": float(combined_risk_score),
+                    "combined_risk_score": combined_risk_score,
                     "is_alert_triggered": bool(is_alert_triggered and not is_suppressed),
-                    "trust_score": max(5, min(100, round((1.0 - combined_risk_score) * 100)))
+                    "trust_score": None,
+                    "assessment_status": self.latest_scores[icao24]["assessment_status"],
+                    "data_quality": record.get("data_quality", {})
                 }
             })
         except Exception:
             pass
 
-        # Invalidate snapshot cache across replicas
-        try:
-            from app.core.redis import redis_client
-            keys = await redis_client.keys("cache:aircraft:snapshot:*")
-            if keys:
-                await redis_client.delete(*keys)
-        except Exception:
-            pass
+        # Aircraft snapshot entries use a short TTL; avoid a Redis KEYS scan for
+        # every aircraft observation, which becomes a blocking O(N) operation.
 
         db_latency = time.perf_counter() - db_start
         PIPELINE_STAGE_LATENCY.labels(stage="db_write").observe(db_latency)

@@ -1,9 +1,8 @@
 .PHONY: dev test lint train migrate
 
 dev:
-	@echo "Launching FastAPI backend and Vite React frontend..."
-	# Launching in parallel windows for development convenience on Windows
-	powershell -Command "Start-Process python -ArgumentList '-m uvicorn app.main:app --reload --port 8001' -WorkingDirectory backend; Start-Process npm -ArgumentList 'run dev' -WorkingDirectory frontend"
+	@echo "Launching AirGuard with database migrations and service health checks..."
+	powershell -NoProfile -ExecutionPolicy Bypass -File .\run_dev.ps1
 
 test:
 	@echo "Running backend test suite..."

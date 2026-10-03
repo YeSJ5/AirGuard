@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     OPENSKY_POLL_INTERVAL_SECONDS: Optional[float] = None
     OPENSKY_GLOBAL_VIEW: bool = True
     MONITOR_REGION: str = "Global"
+    # Keep research classifiers out of live trust decisions until validated for source and cadence.
+    ENABLE_LIVE_ML: bool = False
     
     ALLOWED_ORIGINS: list[str] = [
         "http://localhost:3000",

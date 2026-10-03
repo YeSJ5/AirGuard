@@ -18,7 +18,7 @@ from reportlab.lib import colors
 from app.core.database import get_db
 from app.core.limiter import limiter
 from app.core.config import settings
-from app.models import AircraftState, Alert, ModelRun, User, AuditLog
+from app.models import AircraftAssessment, AircraftState, Alert, ModelRun, User, AuditLog
 from app.api.schemas import (
     AircraftStateResponse, AlertResponse, ModelRunResponse, SystemHealthResponse,
     UserRegister, UserLogin, UserResponse, TokenResponse, AuditLogResponse,
@@ -338,8 +338,9 @@ async def get_aircraft(
         .subquery()
     )
     stmt = (
-        select(AircraftState)
+        select(AircraftState, AircraftAssessment.combined_risk_score)
         .join(subq, (AircraftState.icao24 == subq.c.icao24) & (AircraftState.received_at == subq.c.max_received))
+        .outerjoin(AircraftAssessment, AircraftAssessment.aircraft_state_id == AircraftState.id)
         .order_by(AircraftState.received_at.desc())
     )
     if offset > 0:
@@ -348,12 +349,12 @@ async def get_aircraft(
         stmt = stmt.limit(limit)
 
     result = await db.execute(stmt)
-    states = result.scalars().all()
+    states = result.all()
 
     # Deduplicate in case multiple rows share exact same max_received for same icao24
     seen = set()
     response_items = []
-    for s in states:
+    for s, assessment_risk in states:
         if s.icao24 in seen:
             continue
         seen.add(s.icao24)
@@ -365,30 +366,8 @@ async def get_aircraft(
         staleness_status = "STALE" if is_stale else "LIVE"
 
         # Compute dynamic trust score based on kinematics and recent alert status
-        alert_stmt = (
-            select(Alert)
-            .where(Alert.icao24 == s.icao24)
-            .where((Alert.aircraft_state_id == s.id) | (Alert.detected_at >= cutoff))
-            .order_by(Alert.detected_at.desc())
-            .limit(1)
-        )
-        alert_res = await db.execute(alert_stmt)
-        latest_alert = alert_res.scalar_one_or_none()
-        
-        ml_score = None
-        if active_detection_service is not None:
-            ml_score = active_detection_service.get_latest_score(s.icao24)
-
-        if latest_alert and latest_alert.combined_risk_score is not None:
-            comb_risk = float(latest_alert.combined_risk_score)
-            trust_val = max(5.0, min(100.0, round((1.0 - comb_risk) * 100.0, 1)))
-        elif ml_score is not None:
-            comb_risk = float(ml_score["combined_risk_score"])
-            trust_val = float(ml_score["trust_score"])
-        else:
-            # Never turn an arbitrary kinematic baseline into a confidence score.
-            comb_risk = None
-            trust_val = None
+        comb_risk = assessment_risk
+        trust_val = None  # Risk triage is not a validated aircraft trust rating.
 
         item = AircraftStateResponse(
             id=s.id,
@@ -404,6 +383,7 @@ async def get_aircraft(
             received_at=s.received_at,
             source=s.source,
             reported_nic=s.reported_nic,
+            data_quality=getattr(s, "data_quality", {}) or {},
             is_synthetic=bool(getattr(s, "is_synthetic", False) or s.source == "regional_fallback"),
             last_seen_seconds_ago=round(seconds_ago, 1),
             staleness_status=staleness_status,
@@ -578,9 +558,15 @@ async def get_aircraft_detail(
     )
     latest_alert = alert_result.scalar_one_or_none()
 
+    assessment_result = await db.execute(select(AircraftAssessment).where(AircraftAssessment.aircraft_state_id == latest_state.id).limit(1))
+    latest_assessment = assessment_result.scalar_one_or_none()
     is_flagged = False
-    risk_score = None
-    explanation = "No active review alert is attached to this track. This is not a safety finding or independent verification."
+    risk_score = latest_assessment.combined_risk_score if latest_assessment is not None else None
+    explanation = (
+        "This observation has insufficient scored evidence. This is not a safety finding or independent verification."
+        if risk_score is None else
+        "An available detector signal produced a triage score. The score is not a calibrated trust, safety, or airworthiness rating."
+    )
     reasons = []
     rule_flags = {}
     technical_details = {}
@@ -588,9 +574,9 @@ async def get_aircraft_detail(
     if latest_alert and hasattr(latest_alert, "acknowledged") and not latest_alert.acknowledged:
         alert_dt = ensure_utc_dt(latest_alert.detected_at) if hasattr(latest_alert, "detected_at") else now
         state_id_matches = hasattr(latest_alert, "aircraft_state_id") and latest_alert.aircraft_state_id == latest_state.id
-        if (now - alert_dt).total_seconds() <= 180 or state_id_matches:
+        if state_id_matches:
             is_flagged = True
-            risk_score = float(latest_alert.combined_risk_score) if hasattr(latest_alert, "combined_risk_score") else 0.85
+            risk_score = float(latest_alert.combined_risk_score) if getattr(latest_alert, "combined_risk_score", None) is not None else None
             explanation = getattr(latest_alert, "reason_text", "Flagged — signal inconsistency detected.")
             reasons = [r.strip() for r in (getattr(latest_alert, "reason_text", "") or "").split(";") if r.strip()]
 
@@ -605,8 +591,20 @@ async def get_aircraft_detail(
                 "shap": shap_info.get("shap", {}) if isinstance(shap_info, dict) else {}
             }
 
+    assessment_signals = latest_assessment.signals if latest_assessment is not None and isinstance(latest_assessment.signals, dict) else {}
+    assessment_rules = assessment_signals.get("rule_flags", {}) if isinstance(assessment_signals, dict) else {}
+    if isinstance(assessment_rules, dict):
+        rule_flags.update({key: value for key, value in assessment_rules.items() if isinstance(value, bool)})
+    if latest_assessment is not None:
+        technical_details.update({
+            "rule_risk": 1.0 if any(value is True for value in assessment_rules.values()) else 0.0 if any(isinstance(value, bool) for value in assessment_rules.values()) else None,
+            "ensemble_score": assessment_signals.get("ensemble_score"),
+            "autoencoder_score": assessment_signals.get("autoencoder_score"),
+            "receiver_consistency_score": assessment_signals.get("receiver_consistency"),
+        })
+
     rolling_trust = max(5.0, min(100.0, 100.0 - (risk_score * 100.0))) if risk_score is not None else None
-    status_text = "Flagged — signal inconsistency detected" if is_flagged else "No active review flag"
+    status_text = "Flagged — signal inconsistency detected" if is_flagged else "Insufficient evidence" if risk_score is None else "No active review flag"
 
     trust_resp = AircraftTrustDetailResponse(
         status_text=status_text,
@@ -616,7 +614,7 @@ async def get_aircraft_detail(
         explanation=explanation,
         reasons=reasons,
         rule_flags=rule_flags,
-        technical_details=technical_details,
+        technical_details={**technical_details, "assessment_status": latest_assessment.status if latest_assessment is not None else "UNAVAILABLE", "evidence_confidence": latest_assessment.evidence_confidence if latest_assessment is not None else 0.0, "signals": assessment_signals},
         trilateration_stations=None,
         last_evaluated_at=latest_state.received_at
     )
@@ -635,6 +633,7 @@ async def get_aircraft_detail(
         received_at=latest_state.received_at,
         source=latest_state.source,
         reported_nic=latest_state.reported_nic,
+        data_quality=getattr(latest_state, "data_quality", {}) or {},
         is_synthetic=bool(getattr(latest_state, "is_synthetic", False) or latest_state.source == "regional_fallback"),
         last_seen_seconds_ago=round(seconds_ago, 1),
         staleness_status=tracking_status
@@ -709,7 +708,8 @@ async def get_aircraft_trust_history(
 
     # Query aircraft states along with any matched alerts ordered chronologically
     result = await db.execute(
-        select(AircraftState, Alert.combined_risk_score, Alert.id)
+        select(AircraftState, AircraftAssessment.combined_risk_score, Alert.id)
+        .outerjoin(AircraftAssessment, AircraftAssessment.aircraft_state_id == AircraftState.id)
         .outerjoin(Alert, Alert.aircraft_state_id == AircraftState.id)
         .where(AircraftState.icao24 == clean_icao)
         .order_by(AircraftState.received_at.asc())
@@ -899,7 +899,7 @@ async def get_system_health(
         gap_detected = seconds_since_poll > max_allowed_gap
     else:
         seconds_since_poll = (now_utc - START_TIME).total_seconds()
-        gap_detected = seconds_since_poll > max_allowed_gap
+        gap_detected = False
 
     upstream_status = str(SYSTEM_STATS.get("upstream_status", "UNKNOWN"))
     feed_mode = str(SYSTEM_STATS.get("feed_mode", "UNKNOWN"))
@@ -919,6 +919,9 @@ async def get_system_health(
     elif upstream_status == "UNAVAILABLE":
         live_continuity_status = "UPSTREAM_UNAVAILABLE"
         continuity_msg = "The configured aircraft feed is unavailable. Check its connection and credentials."
+    elif upstream_status == "UNKNOWN":
+        live_continuity_status = "AWAITING_FIRST_POLL"
+        continuity_msg = "No upstream poll has completed in this process yet; live feed health is unverified."
     else:
         live_continuity_status = "HEALTHY"
         continuity_msg = f"The configured aircraft feed is responding. Last successful response was {seconds_since_poll:.1f}s ago."
@@ -976,15 +979,11 @@ async def websocket_endpoint(
     db: AsyncSession = Depends(get_db)
 ):
     """WebSocket endpoint to subscribe to real-time ADS-B states and security alert broadcasts."""
-    effective_token = token
-    if not effective_token and settings.ENV != "prod":
-        effective_token = "demo-token"
-
-    if not effective_token:
+    if not token:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    user = await get_websocket_user(db, effective_token)
+    user = await get_websocket_user(db, token)
     if not user:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return

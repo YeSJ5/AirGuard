@@ -44,7 +44,7 @@ class TrustScoringEnsemble:
                 self.explainer = None
         return self.explainer
 
-    def predict_anomaly(self, feature_vector: np.ndarray, compute_shap: bool = True) -> Tuple[float, Dict[str, Any]]:
+    def predict_anomaly(self, feature_vector: np.ndarray, compute_shap: bool = True) -> Tuple[float | None, Dict[str, Any]]:
         """Predict anomaly probability and generate top-3 SHAP feature contributions.
 
         Returns:
@@ -52,18 +52,7 @@ class TrustScoringEnsemble:
             shap_explanation: dict containing top 3 features and base value.
         """
         if self.model is None:
-            # Fallback if model is not trained/loaded: use sum of rule flags
-            rule_flags_sum = sum(feature_vector[4:])
-            prob = min(1.0, rule_flags_sum * 0.3)
-            fallback_explanation = {
-                "top_features": [
-                    {"feature": FEATURE_NAMES[i], "value": float(feature_vector[i])}
-                    for i in range(4, len(FEATURE_NAMES)) if feature_vector[i] > 0
-                ][:3],
-                "base_value": 0.02,
-                "note": "fallback_no_trained_model"
-            }
-            return prob, fallback_explanation
+            return None, {"status": "unavailable", "reason": "No trained ensemble model is loaded."}
 
         # Ensure correct shape
         X = feature_vector.reshape(1, -1)

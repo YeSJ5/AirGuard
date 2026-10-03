@@ -1,13 +1,15 @@
 import type { Flight, AlertLog, HealthStats, ModelRunStats, User, AuditLog, RuleConfigState, AircraftTrustHistory } from '../types';
 
 const BACKEND_PORT = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BACKEND_PORT) || '8001';
-const HOSTNAME = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : '127.0.0.1';
+const HOSTNAME = typeof window !== 'undefined' && window.location?.hostname
+  ? (window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname)
+  : '127.0.0.1';
 export const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_URL) || `http://${HOSTNAME}:${BACKEND_PORT}`;
 export const WS_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_WS_URL) || `ws://${HOSTNAME}:${BACKEND_PORT}`;
 
 export const getAuthToken = (): string | null => {
   if (typeof window === 'undefined') return null;
-  return localStorage.getItem('airguard_token') || 'demo-token';
+  return localStorage.getItem('airguard_token');
 };
 
 export const fetchWithAuth = async (url: string, options: RequestInit = {}): Promise<Response> => {

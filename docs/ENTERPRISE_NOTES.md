@@ -39,7 +39,7 @@ Running deep learning models (such as autoencoders or PyTorch classifiers) inlin
 * **High-Performance Communication**: Workers serialize states and send them via **gRPC** to Triton.
 * **Benefits**:
   * **Dynamic Batching**: Triton automatically queues and groups incoming high-frequency requests, optimizing GPU matrix utilization.
-  * **GPU Acceleration**: Offloads Autoencoder evaluations to GPU instances (e.g., NVIDIA T4), leaving workers to perform fast CPU-bound mathematical checks (e.g., geo-trilateration).
+  * **GPU Acceleration**: Consider only after introducing a validated model and measuring inference load. Current live scoring does not depend on a trained model or receiver geometry.
   * **Zero-Downtime Updates**: Update detection model weights on Triton dynamically without restarting the ingestion or worker services.
 
 ---
@@ -51,7 +51,7 @@ For a highly available production station tracking 10,000 concurrent aircraft:
 | Component | AWS Resource Details | Monthly Cost (USD) | Rationale |
 | :--- | :--- | :--- | :--- |
 | **Compute (API Gateway)** | 5 $\times$ `t3.medium` instances (ECS/EKS) | \$150 | Handles WebSocket client connections and REST queries. |
-| **Compute (Workers)** | 10 $\times$ `c6i.large` compute-optimized | \$620 | Performs geo-trilateration, rule evaluations, and stream reads. |
+| **Compute (Workers)** | Deployment-dependent | Not estimated | Size after measuring live feed volume, database write rate, and worker latency. |
 | **Compute (Inference)** | 2 $\times$ `g4dn.xlarge` (NVIDIA T4 GPUs) | \$760 | Runs autoencoders and XGBoost threat classifiers. |
 | **Database** | AWS Aurora Postgres (`db.r6g.xlarge` Multi-AZ) | \$360 | Transactional database for user profiles, configuration, and alerts. |
 | **Database Storage** | Provisioned IOPS (5.2 TB hot time-series storage) | \$700 | Handles heavy concurrent writes (10k writes/sec). |

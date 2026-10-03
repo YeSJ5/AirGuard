@@ -42,7 +42,7 @@ Coordinate tasks using the root `Makefile`:
   ```bash
   make dev
   ```
-  *Launches local FastAPI backend (`http://localhost:8001`) and Vite frontend (`http://localhost:5173`) concurrently.*
+  This runs `run_dev.ps1`, checks the backend runtime, applies database migrations, starts the API and frontend, and waits for the API health endpoint. Install Python 3.11 and backend dependencies first with `python -m pip install -r requirements.txt`; set PostgreSQL and Redis URLs in `.env`. If Python exists but the packages are missing, `powershell -ExecutionPolicy Bypass -File .\run_dev.ps1 -InstallDependencies` installs them. Logs are written to the system temporary directory.
 
 - **Run Database Migrations (Local Mode)**:
   ```bash

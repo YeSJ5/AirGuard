@@ -22,6 +22,7 @@ class AircraftState(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     source: Mapped[str] = mapped_column(String(20), default="opensky", server_default="opensky")
     reported_nic: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    data_quality: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     # Relationships
@@ -40,8 +41,8 @@ class Alert(Base):
     icao24: Mapped[str] = mapped_column(String(6))
     aircraft_state_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("aircraft_states.id"), nullable=False)
     rule_flags: Mapped[List[str]] = mapped_column(ARRAY(Text))
-    ensemble_score: Mapped[float] = mapped_column(Float)
-    autoencoder_score: Mapped[float] = mapped_column(Float)
+    ensemble_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    autoencoder_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     combined_risk_score: Mapped[float] = mapped_column(Float)
     reason_text: Mapped[str] = mapped_column(Text)
     shap_explanation: Mapped[Dict[str, Any]] = mapped_column(JSONB)
@@ -51,6 +52,21 @@ class Alert(Base):
 
     # Relationships
     aircraft_state: Mapped["AircraftState"] = relationship(back_populates="alerts")
+
+
+class AircraftAssessment(Base):
+    """Versioned detector output for every persisted telemetry observation."""
+    __tablename__ = "aircraft_assessments"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    aircraft_state_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("aircraft_states.id", ondelete="CASCADE"), unique=True, nullable=False)
+    icao24: Mapped[str] = mapped_column(String(6), index=True, nullable=False)
+    combined_risk_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    evidence_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    signals: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    detector_version: Mapped[str] = mapped_column(String(32), nullable=False, default="rules-v2")
+    assessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
 class ModelRun(Base):

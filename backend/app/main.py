@@ -17,8 +17,6 @@ from app.core.limiter import limiter
 from app.ingestion.service import OpenSkyIngestionService
 from app.core.database import async_session_maker
 from app.core.redis import redis_client
-from sqlalchemy import select
-from app.models import User
 
 # 1. Custom JSON Log Formatter with OTel Trace Correlation IDs
 class TraceCorrelationJsonFormatter(jsonlogger.JsonFormatter):
@@ -43,24 +41,6 @@ logger.setLevel(settings.LOG_LEVEL)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """LIFESPAN: Initializes services, sets up Redis PubSub socket synchronization, and starts ingestion."""
-    # Seed default users if none exist
-    try:
-        async with async_session_maker() as session:
-            res = await session.execute(select(User).limit(1))
-            if not res.scalar_one_or_none():
-                from app.core.security import get_password_hash
-                default_password_hash = get_password_hash("AirGuard2026!")
-                default_users = [
-                    User(email="admin@airguard.sec", hashed_password=default_password_hash, role="admin"),
-                    User(email="analyst@airguard.sec", hashed_password=default_password_hash, role="analyst"),
-                    User(email="viewer@airguard.sec", hashed_password=default_password_hash, role="viewer"),
-                ]
-                session.add_all(default_users)
-                await session.commit()
-                logger.info("Successfully seeded default system users: admin, analyst, viewer.")
-    except Exception as e:
-        logger.warning(f"Could not seed default users: {e}")
-
     # Instantiate ML models & Detection Service
     from app.detection.ensemble import TrustScoringEnsemble
     from app.detection.autoencoder import UnsupervisedAutoencoder

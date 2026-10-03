@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -121,45 +122,53 @@ class OpenSkyIngestionService:
           - If position_source is MLAT (2) or radar (1), GPS avionics NIC is null.
           - Otherwise, reported_nic defaults to None when not provided by the current transponder feed.
         """
-        # Critical Filter: We require latitude and longitude to track/score aircraft
-        if len(vector) < 7 or vector[5] is None or vector[6] is None:
+        # Do not turn missing telemetry into plausible-looking zeros. DB numeric
+        # columns remain non-null for compatibility, while data_quality tells every
+        # downstream consumer which values were actually observed.
+        def raw(index: int) -> Any:
+            return vector[index] if index < len(vector) else None
+
+        def number(index: int) -> Optional[float]:
+            value = raw(index)
+            if value is None:
+                return None
+            try:
+                parsed = float(value)
+                return parsed if math.isfinite(parsed) else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+        icao24 = str(raw(0) or "").strip().lower()
+        if len(icao24) != 6 or any(c not in "0123456789abcdef" for c in icao24):
             return None
 
-        icao24 = str(vector[0]).strip().lower()
-        callsign = str(vector[1]).strip() if vector[1] is not None else None
+        lat_value, lon_value = number(6), number(5)
+        if lat_value is None or lon_value is None or not (-90 <= lat_value <= 90 and -180 <= lon_value <= 180):
+            return None
+        lat, lng = lat_value, lon_value
+        callsign_value = raw(1)
+        callsign = str(callsign_value).strip() or None if callsign_value is not None else None
 
-        # Unit Conversions & Null Handling:
-        # - Latitude/Longitude: decimal degrees (No conversion, stored directly)
-        lat = float(vector[6])
-        lng = float(vector[5])
+        baro_altitude, geo_altitude = number(7), number(13)
+        altitude = baro_altitude if baro_altitude is not None else geo_altitude
+        velocity = number(9)
+        heading = number(10)
+        vertical_rate = number(11)
+        ground_value = raw(8)
+        on_ground = ground_value if isinstance(ground_value, bool) else None
+        sensors = raw(12) if isinstance(raw(12), list) else None
 
-        # - Altitude: OpenSky delivers altitude in meters.
-        #   We use baro_altitude (index 7) as primary, falling back to geo_altitude (index 13).
-        #   If both are null, we set to 0.0 and document default.
-        altitude = 0.0
-        if vector[7] is not None:
-            altitude = float(vector[7])
-        elif vector[13] is not None:
-            altitude = float(vector[13])
+        observed_fields = ["latitude", "longitude"]
+        if baro_altitude is not None or geo_altitude is not None: observed_fields.append("altitude")
+        if velocity is not None: observed_fields.append("velocity")
+        if heading is not None: observed_fields.append("heading")
+        if vertical_rate is not None: observed_fields.append("vertical_rate")
+        if on_ground is not None: observed_fields.append("on_ground")
+        if sensors is not None: observed_fields.append("sensor_ids")
 
-        # - Velocity: OpenSky ground speed is delivered in m/s. Stored directly. Default to 0.0.
-        velocity = float(vector[9]) if vector[9] is not None else 0.0
-
-        # - Heading: OpenSky track angle is in decimal degrees from North. Default to 0.0.
-        heading = float(vector[10]) if vector[10] is not None else 0.0
-
-        # - Vertical Rate: OpenSky vertical speed is in m/s. Stored directly. Default to 0.0.
-        vertical_rate = float(vector[11]) if vector[11] is not None else 0.0
-
-        on_ground = bool(vector[8])
-
-        # - Received timestamp: Convert unix epoch to timezone-aware datetime.
-        #   Fallback sequence: time_position (index 3) -> last_contact (index 4) -> current system time.
-        timestamp_epoch = vector[3] if vector[3] is not None else vector[4]
-        if timestamp_epoch is not None:
-            received_at = datetime.fromtimestamp(timestamp_epoch, tz=timezone.utc)
-        else:
-            received_at = datetime.now(timezone.utc)
+        timestamp_epoch = number(3) or number(4)
+        timestamp_source = "time_position" if number(3) is not None else "last_contact" if number(4) is not None else "local_ingest_time"
+        received_at = datetime.fromtimestamp(timestamp_epoch, tz=timezone.utc) if timestamp_epoch is not None else datetime.now(timezone.utc)
 
         # - Navigation Integrity Category (NIC) extraction:
         # Check index 18 if provided in extended state vectors
@@ -190,11 +199,20 @@ class OpenSkyIngestionService:
             "callsign": callsign,
             "latitude": lat,
             "longitude": lng,
-            "altitude_m": altitude,
-            "velocity_ms": velocity,
-            "heading_deg": heading,
-            "vertical_rate_ms": vertical_rate,
-            "on_ground": on_ground,
+            "altitude_m": altitude if altitude is not None else 0.0,
+            "velocity_ms": velocity if velocity is not None else 0.0,
+            "heading_deg": heading if heading is not None else 0.0,
+            "vertical_rate_ms": vertical_rate if vertical_rate is not None else 0.0,
+            "on_ground": on_ground if on_ground is not None else False,
+            "sensors": sensors,
+            "data_quality": {
+                "observed_fields": observed_fields,
+                "missing_fields": [name for name, present in (("altitude", altitude is not None), ("velocity", velocity is not None), ("heading", heading is not None), ("vertical_rate", vertical_rate is not None), ("on_ground", on_ground is not None)) if not present],
+                "altitude_source": "barometric" if baro_altitude is not None else "geometric" if geo_altitude is not None else None,
+                "timestamp_source": timestamp_source,
+                "position_source": raw(16),
+                "sensors_are_geometry": False
+            },
             "received_at": received_at,
             "source": "opensky",
             "reported_nic": reported_nic,
@@ -311,12 +329,11 @@ class OpenSkyIngestionService:
             # Prominently log raw response status code and record count to console / stdout on EVERY poll
             record_count = 0
             if res.status_code == 200:
-                try:
-                    data = res.json()
-                    states = data.get("states") or []
-                    record_count = len(states)
-                except Exception:
-                    states = []
+                data = res.json()
+                if not isinstance(data, dict) or (data.get("states") is not None and not isinstance(data.get("states"), list)):
+                    raise ValueError("OpenSky returned an unexpected response shape; this is not a successful live poll.")
+                states = data.get("states") or []
+                record_count = len(states)
             else:
                 states = []
 
@@ -474,7 +491,11 @@ class OpenSkyIngestionService:
 
         normalized_records = []
         for vector in vectors_to_process:
-            normalized = self.normalize_state(vector)
+            try:
+                normalized = self.normalize_state(vector)
+            except (TypeError, ValueError, OverflowError, OSError, IndexError) as exc:
+                logger.warning("Skipping malformed upstream state vector: %s", exc)
+                continue
             if normalized is not None:
                 normalized.setdefault("metadata", {})
                 normalized["metadata"]["is_synthetic"] = False
@@ -514,7 +535,9 @@ class OpenSkyIngestionService:
 
         # 3. In-Process Processing Fallback
         import os
-        should_process_in_process = (not redis_available) or os.getenv("ENABLE_IN_PROCESS_DETECTION", "true").lower() == "true"
+        # Redis-stream workers are authoritative when Redis is healthy. Running detection
+        # here as well duplicates each observation and splits per-aircraft history.
+        should_process_in_process = (not redis_available) or os.getenv("ENABLE_IN_PROCESS_DETECTION", "false").lower() == "true"
         if self.detection_service and should_process_in_process and normalized_records:
             async def _process_batch(records_to_process):
                 sem = asyncio.Semaphore(15)
