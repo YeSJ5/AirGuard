@@ -119,6 +119,7 @@ async def test_circuit_breaker_and_backoff():
     # Set the return value to a successful mock response
     mock_res = MagicMock()
     mock_res.status_code = 200
+    mock_res.headers = {"x-rate-limit-remaining": "100"}
     mock_res.json.return_value = {"states": [
         ["a1b2c3", "UAL824", "USA", 1722784490, 1722784495, -122.4194, 37.7749, 10000.0, False, 250.0, 180.0, 0.0, None, 10100.0, "1200", False, 0]
     ]}

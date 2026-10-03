@@ -17,24 +17,102 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  backend:
+  redis:
+    image: redis:7-alpine
+    container_name: airguard_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: airguard_jaeger
+    ports:
+      - "16686:16686" # Web UI
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: airguard_prometheus
+    volumes:
+      - ./prometheus:/etc/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: airguard_grafana
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  api:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
-    container_name: airguard_backend
     environment:
+      - ENV=dev
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-airguard}
+      - REDIS_URL=redis://redis:6379/0
+      - JAEGER_HOST=jaeger
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - POSTGRES_DB=${POSTGRES_DB:-airguard}
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - RUN_INGESTION=true
+      - OPENSKY_USERNAME=${OPENSKY_USERNAME:-}
+      - OPENSKY_PASSWORD=${OPENSKY_PASSWORD:-}
+      - OPENSKY_GLOBAL_VIEW=true
     ports:
       - "8001:8001"
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8001"
+    deploy:
+      replicas: 1
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+  detection_worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    environment:
+      - ENV=dev
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-airguard}
+      - REDIS_URL=redis://redis:6379/0
+      - JAEGER_HOST=jaeger
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    command: python app/worker.py
+    deploy:
+      replicas: 2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
 
   frontend:
     build:
@@ -44,7 +122,7 @@ services:
     ports:
       - "5173:80"
     depends_on:
-      - backend
+      - api
 
 volumes:
   pgdata:

@@ -9,7 +9,7 @@ from scripts.train_ensemble import generate_synthetic_data
 
 def test_generate_synthetic_data():
     X, y = generate_synthetic_data(n_samples_per_class=100)
-    assert X.shape == (200, 8)
+    assert X.shape == (200, 9)
     assert y.shape == (200,)
     assert np.all((y == 0) | (y == 1))
 
@@ -20,11 +20,11 @@ def test_ensemble_fallback():
         ensemble = TrustScoringEnsemble()
         assert ensemble.model is None
         
-        # Test input vector with position jump triggered
-        feature_vector = np.array([0.0, 0.0, 0.0, 8.0, 1.0, 0.0, 0.0, 0.0])
+        # Test input vector with position jump triggered (9 features)
+        feature_vector = np.array([0.0, 0.0, 0.0, 8.0, 1.0, 0.0, 0.0, 0.0, 0.0])
         prob, explanation = ensemble.predict_anomaly(feature_vector)
         
-        assert prob == 0.4
+        assert prob == 0.3
         assert explanation["note"] == "fallback_no_trained_model"
         assert len(explanation["top_features"]) == 1
         assert explanation["top_features"][0]["feature"] == "rule_position_jump"
@@ -53,8 +53,8 @@ def test_ensemble_training_and_shap():
             assert ensemble.model is not None
             assert ensemble.explainer is not None
             
-            # Predict normal vector (all zeros)
-            normal_vector = np.array([0.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 0.0])
+            # Predict normal vector (all zeros, 9 features)
+            normal_vector = np.array([0.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0])
             prob_norm, expl_norm = ensemble.predict_anomaly(normal_vector)
             
             assert 0.0 <= prob_norm <= 1.0
@@ -65,8 +65,8 @@ def test_ensemble_training_and_shap():
                 assert "value" in feat
                 assert isinstance(feat["value"], float)
                 
-            # Predict anomaly vector (all rule flags triggered)
-            anomaly_vector = np.array([50.0, 20.0, 10.0, 8.0, 1.0, 1.0, 1.0, 1.0])
+            # Predict anomaly vector (all rule flags triggered, 9 features)
+            anomaly_vector = np.array([50.0, 20.0, 10.0, 8.0, 1.0, 1.0, 1.0, 1.0, 1.0])
             prob_anom, expl_anom = ensemble.predict_anomaly(anomaly_vector)
             assert prob_anom > prob_norm
             

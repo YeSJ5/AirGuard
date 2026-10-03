@@ -6,7 +6,8 @@ from app.detection.rules import (
     check_position_jump,
     check_duplicate_icao,
     check_impossible_climb_rate,
-    check_altitude_velocity_mismatch
+    check_altitude_velocity_mismatch,
+    check_low_signal_confidence
 )
 
 # --- 1. Position Jump Boundary Tests ---
@@ -181,3 +182,91 @@ def test_joint_known_entities_suppression():
     assert not res["flagged"]
     assert res["suppressed"]
     assert res["reason"] == "Known Entity Suppression"
+
+
+# --- 6. Low Signal Confidence (NIC + Spatial Displacement) Tests ---
+
+def test_low_signal_confidence_fires_on_jump_and_low_nic():
+    """Confirms rule fires on synthetic low-confidence (NIC < 7) + position jump (> 10 km)."""
+    config = RuleConfig(min_reliable_nic=7, min_confidence_jump_km=10.0)
+
+    # Coordinates ~35 km apart (Delhi to Ghaziabad outskirts)
+    prev_lat, prev_lon = 28.6139, 77.2090
+    curr_lat, curr_lon = 28.8500, 77.4500
+
+    flagged, reason, evidence = check_low_signal_confidence(
+        reported_nic=4, # Degraded GPS integrity
+        current_lat=curr_lat,
+        current_lon=curr_lon,
+        prev_lat=prev_lat,
+        prev_lon=prev_lon,
+        config=config
+    )
+
+    assert flagged is True
+    assert reason is not None
+    assert "Low signal confidence anomaly" in reason
+    assert evidence["reported_nic"] == 4
+    assert evidence["distance_km"] > 10.0
+
+
+def test_low_signal_confidence_does_not_fire_on_stable_position():
+    """Confirms rule does NOT fire on low-confidence-only case with a stable position (<= 10 km)."""
+    config = RuleConfig(min_reliable_nic=7, min_confidence_jump_km=10.0)
+
+    # Position essentially stable (~80 meters apart)
+    prev_lat, prev_lon = 28.6139, 77.2090
+    curr_lat, curr_lon = 28.6145, 77.2095
+
+    flagged, reason, evidence = check_low_signal_confidence(
+        reported_nic=4, # Low NIC alone is not sufficient without displacement
+        current_lat=curr_lat,
+        current_lon=curr_lon,
+        prev_lat=prev_lat,
+        prev_lon=prev_lon,
+        config=config
+    )
+
+    assert flagged is False
+    assert reason is None
+    assert evidence["reported_nic"] == 4
+    assert evidence["distance_km"] < 1.0
+
+
+def test_low_signal_confidence_does_not_fire_on_reliable_nic():
+    """Confirms rule does NOT fire when NIC is at or above reliable threshold (NIC >= 7)."""
+    config = RuleConfig(min_reliable_nic=7, min_confidence_jump_km=10.0)
+
+    # Big displacement (~35 km) but healthy NIC 9
+    prev_lat, prev_lon = 28.6139, 77.2090
+    curr_lat, curr_lon = 28.8500, 77.4500
+
+    flagged, reason, evidence = check_low_signal_confidence(
+        reported_nic=9,
+        current_lat=curr_lat,
+        current_lon=curr_lon,
+        prev_lat=prev_lat,
+        prev_lon=prev_lon,
+        config=config
+    )
+
+    assert flagged is False
+    assert reason is None
+
+
+def test_low_signal_confidence_does_not_fire_when_nic_none():
+    """Confirms rule does NOT fire when NIC is missing/null."""
+    config = RuleConfig(min_reliable_nic=7, min_confidence_jump_km=10.0)
+
+    flagged, reason, evidence = check_low_signal_confidence(
+        reported_nic=None,
+        current_lat=28.8500,
+        current_lon=77.4500,
+        prev_lat=28.6139,
+        prev_lon=77.2090,
+        config=config
+    )
+
+    assert flagged is False
+    assert reason is None
+

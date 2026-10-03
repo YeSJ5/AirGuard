@@ -9,8 +9,12 @@ from app.main import app
 from app.api.v1.endpoints import manager, SYSTEM_STATS
 from app.models import AircraftState, Alert, ModelRun
 
-# Override the get_db dependency
+# Override the get_db and auth dependencies
 from app.core.database import get_db
+from app.api.deps import get_current_user, require_viewer, require_analyst, require_admin
+from app.models import User
+
+from unittest.mock import MagicMock, AsyncMock, patch
 
 @pytest.fixture
 def mock_db():
@@ -19,8 +23,14 @@ def mock_db():
 
 @pytest.fixture(autouse=True)
 def override_db_dependency(mock_db):
+    mock_user = User(id=1, email="test@airguard.sec", role="admin")
     app.dependency_overrides[get_db] = lambda: mock_db
-    yield
+    app.dependency_overrides[get_current_user] = lambda: mock_user
+    app.dependency_overrides[require_viewer] = lambda: mock_user
+    app.dependency_overrides[require_analyst] = lambda: mock_user
+    app.dependency_overrides[require_admin] = lambda: mock_user
+    with patch("app.api.v1.endpoints.redis_client.get", new=AsyncMock(return_value=None)):
+        yield
     app.dependency_overrides.clear()
 
 @pytest.mark.asyncio
@@ -83,6 +93,41 @@ async def test_get_aircraft_history(mock_db):
     data = res.json()
     assert len(data) == 1
     assert data[0]["icao24"] == "a1b2c3"
+
+@pytest.mark.asyncio
+async def test_get_aircraft_detail(mock_db):
+    mock_state = AircraftState(
+        id=1, 
+        icao24="a1b2c3", 
+        callsign="UAL824", 
+        latitude=37.7749, 
+        longitude=-122.4194,
+        altitude_m=10000.0, 
+        velocity_ms=250.0, 
+        heading_deg=180.0, 
+        vertical_rate_ms=0.0,
+        on_ground=False, 
+        received_at=datetime.now(timezone.utc), 
+        source="opensky"
+    )
+    
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = mock_state
+    mock_db.execute.return_value = mock_res
+    
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        res = await ac.get("/api/v1/aircraft/a1b2c3/detail")
+        
+    assert res.status_code == 200
+    data = res.json()
+    assert data["icao24"] == "a1b2c3"
+    assert data["live_state"]["callsign"] == "UAL824"
+    assert "route" in data
+    assert "identity" in data
+    assert "trust_status" in data
+    assert "staleness" in data
+    assert data["staleness"]["status"] in ["LIVE", "STALE", "LOST"]
 
 @pytest.mark.asyncio
 async def test_get_alerts(mock_db):
@@ -181,6 +226,7 @@ async def test_get_model_runs(mock_db):
 @pytest.mark.asyncio
 async def test_system_health():
     SYSTEM_STATS["last_successful_poll"] = datetime.now(timezone.utc)
+    SYSTEM_STATS["poll_latency_ms"] = 124.5
     
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -198,8 +244,7 @@ def test_websocket_broadcast():
         async def do_broadcast():
             await manager.broadcast({"event": "ALERT_TRIGGERED", "icao24": "test11"})
             
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(do_broadcast())
+        asyncio.run(do_broadcast())
         
         msg = websocket.receive_json()
         assert msg["event"] == "ALERT_TRIGGERED"
@@ -216,11 +261,14 @@ async def test_generate_session_report(mock_db):
             Alert(
                 id=1, 
                 icao24="a1b2c3", 
-                callsign="UAL824", 
+                aircraft_state_id=1, 
                 rule_flags=["rule_position_jump"],
+                ensemble_score=0.8,
+                autoencoder_score=0.7,
                 combined_risk_score=0.85, 
                 reason_text="Implied speed anomaly",
-                shap_explanation={"shap": {"speed": 0.5}}
+                shap_explanation={"shap": {"speed": 0.5}},
+                detected_at=datetime.now(timezone.utc)
             )
         ])),
         # Model run query
@@ -236,11 +284,14 @@ async def test_generate_session_report(mock_db):
             Alert(
                 id=1, 
                 icao24="a1b2c3", 
-                callsign="UAL824", 
+                aircraft_state_id=1, 
                 rule_flags=["rule_position_jump"],
+                ensemble_score=0.8,
+                autoencoder_score=0.7,
                 combined_risk_score=0.85, 
                 reason_text="Implied speed anomaly",
-                shap_explanation={"shap": {"speed": 0.5}}
+                shap_explanation={"shap": {"speed": 0.5}},
+                detected_at=datetime.now(timezone.utc)
             )
         ]))
     ]
@@ -268,10 +319,12 @@ async def test_get_all_aircraft_history(mock_db):
         vertical_rate_ms=0.0,
         on_ground=False, 
         received_at=datetime.now(timezone.utc), 
-        source="opensky"
+        source="opensky",
+        is_synthetic=False
     )
     
     mock_res = MagicMock()
+    mock_res.scalar.return_value = 1
     mock_res.scalars.return_value.all.return_value = [mock_state]
     mock_db.execute.return_value = mock_res
     
@@ -283,6 +336,44 @@ async def test_get_all_aircraft_history(mock_db):
     data = res.json()
     assert len(data) == 1
     assert data[0]["icao24"] == "a1b2c3"
+    assert res.headers["x-total-count"] == "1"
+    assert res.headers["x-is-truncated"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_get_all_aircraft_history_naive_and_paginated(mock_db):
+    mock_state = AircraftState(
+        id=1, 
+        icao24="a1b2c3", 
+        callsign="UAL824", 
+        latitude=37.7749, 
+        longitude=-122.4194,
+        altitude_m=10000.0, 
+        velocity_ms=250.0, 
+        heading_deg=180.0, 
+        vertical_rate_ms=0.0,
+        on_ground=False, 
+        received_at=datetime.now(timezone.utc), 
+        source="opensky",
+        is_synthetic=False
+    )
+    
+    mock_res = MagicMock()
+    mock_res.scalar.return_value = 50
+    mock_res.scalars.return_value.all.return_value = [mock_state]
+    mock_db.execute.return_value = mock_res
+    
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Test with naive timestamp (no Z) and limit=1
+        res = await ac.get("/api/v1/aircraft/history?start=2026-08-04T00:00:00&end=2026-08-04T23:59:59&limit=1&icao24=a1b2c3")
+        
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data) == 1
+    assert res.headers["x-total-count"] == "50"
+    assert res.headers["x-is-truncated"] == "true"
+    assert "x-query-start-utc" in res.headers
 
 
 @pytest.mark.asyncio

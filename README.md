@@ -1,8 +1,10 @@
 # AirGuard Monorepo
 
-![Coverage](https://img.shields.io/badge/Coverage-85%25-brightgreen)
+AirGuard is an airspace awareness and signal-quality learning platform built around ADS-B reports. It helps people explore reported aircraft movement, understand how fresh a report is, and inspect why a signal was flagged for review. It is not an air traffic control service or a safety certification system.
 
-AirGuard is a real-time ADS-B trust-scoring ground station. This repository is organized as a monorepo containing the backend service, frontend dashboard, training/utility scripts, containerization config, and CI setup.
+The product is designed for the public, aviation learners, researchers and monitoring teams. AirGuard requests the global OpenSky state feed and displays only aircraft reports actually returned by that provider. Visibility and update speed depend on receiver coverage, account quota, and provider availability; no source can guarantee that every aircraft worldwide is observed. The app shows an empty, explicit feed status when live reports are unavailable instead of generated traffic. See [the product vision and delivery plan](docs/PRODUCT_VISION.md).
+
+This repository is organized as a monorepo containing the backend service, frontend dashboard, training and utility scripts, containerization config, and CI setup.
 
 ## Getting Started
 
@@ -17,6 +19,7 @@ Set up and launch the entire AirGuard stack (PostgreSQL database, FastAPI backen
    ```bash
    cp .env.example .env
    ```
+   Install the backend dependencies from the single root requirements file with `python -m pip install -r requirements.txt`.
 
 3. **Launch the Containerized Stack**:
    ```bash
@@ -73,11 +76,3 @@ You can run and debug the entire stack directly in VSCode:
    *This starts the frontend task and attaches the debugger to the FastAPI backend dynamically.*
 
 ## Manual Script Commands
-- **Inject Anomalies (narration mode)**:
-  ```bash
-  python scripts/inject_anomaly.py --type position_jump
-  ```
-- **Inject Anomalies (batch script demo)**:
-  ```bash
-  python scripts/inject_anomaly.py --batch
-  ```

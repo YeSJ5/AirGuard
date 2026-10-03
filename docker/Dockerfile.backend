@@ -1,36 +1,18 @@
-# Stage 1: Build dependencies
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
+WORKDIR /build
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-ENV PIP_NO_CACHE_DIR=off \
-    PIP_DISABLE_PIP_VERSION_CHECK=on \
-    PIP_DEFAULT_TIMEOUT=100 \
-    POETRY_VERSION=1.8.2 \
-    POETRY_HOME="/opt/poetry" \
-    POETRY_VIRTUALENVS_IN_PROJECT=true \
-    POETRY_NO_INTERACTION=1
-
-ENV PATH="$POETRY_HOME/bin:$PATH"
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl -sSL https://install.python-poetry.org | python3 -
-
-WORKDIR /backend
-COPY backend/pyproject.toml backend/poetry.lock* ./
-RUN poetry install --no-root --only main
-
-# Stage 2: Runtime image
-FROM python:3.11-slim as runtime
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-ENV PATH="/backend/.venv/bin:$PATH"
-
-COPY --from=builder /backend/.venv /backend/.venv
+COPY --from=builder /install /usr/local
 COPY backend/app ./app
+COPY backend/alembic ./alembic
+COPY backend/alembic.ini ./alembic.ini
+
+ENV PYTHONPATH="/app"
 
 EXPOSE 8000
 

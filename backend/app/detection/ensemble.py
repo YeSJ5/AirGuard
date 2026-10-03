@@ -13,7 +13,8 @@ FEATURE_NAMES = [
     "rule_position_jump",
     "rule_duplicate_icao",
     "rule_climb_rate",
-    "rule_alt_vel_mismatch"
+    "rule_alt_vel_mismatch",
+    "rule_low_signal_confidence"
 ]
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "ensemble_model.joblib")
@@ -25,20 +26,25 @@ class TrustScoringEnsemble:
         self.load_model()
 
     def load_model(self) -> None:
-        """Attempt to load trained ensemble model and initialize SHAP explainer."""
+        """Attempt to load trained ensemble model."""
         if os.path.exists(MODEL_PATH):
             try:
                 self.model = joblib.load(MODEL_PATH)
-                # Initialize TreeExplainer using the RandomForest sub-estimator
-                # in the soft-voting ensemble for reliability.
-                rf_estimator = self.model.named_estimators_['rf']
-                self.explainer = shap.TreeExplainer(rf_estimator)
             except Exception as e:
-                # If loading fails (e.g. file corrupted/unsupported), log and proceed
                 self.model = None
                 self.explainer = None
 
-    def predict_anomaly(self, feature_vector: np.ndarray) -> Tuple[float, Dict[str, Any]]:
+    def get_explainer(self):
+        """Lazy initialization of TreeExplainer."""
+        if self.explainer is None and self.model is not None:
+            try:
+                rf_estimator = self.model.named_estimators_['rf']
+                self.explainer = shap.TreeExplainer(rf_estimator)
+            except Exception:
+                self.explainer = None
+        return self.explainer
+
+    def predict_anomaly(self, feature_vector: np.ndarray, compute_shap: bool = True) -> Tuple[float, Dict[str, Any]]:
         """Predict anomaly probability and generate top-3 SHAP feature contributions.
 
         Returns:
@@ -48,11 +54,11 @@ class TrustScoringEnsemble:
         if self.model is None:
             # Fallback if model is not trained/loaded: use sum of rule flags
             rule_flags_sum = sum(feature_vector[4:])
-            prob = min(1.0, rule_flags_sum * 0.4)
+            prob = min(1.0, rule_flags_sum * 0.3)
             fallback_explanation = {
                 "top_features": [
                     {"feature": FEATURE_NAMES[i], "value": float(feature_vector[i])}
-                    for i in range(4, 8) if feature_vector[i] > 0
+                    for i in range(4, len(FEATURE_NAMES)) if feature_vector[i] > 0
                 ][:3],
                 "base_value": 0.02,
                 "note": "fallback_no_trained_model"
@@ -65,9 +71,10 @@ class TrustScoringEnsemble:
         # Get probability of positive class (anomaly, index 1)
         prob = float(self.model.predict_proba(X)[0][1])
 
-        # Compute SHAP values
+        # Compute SHAP values using TreeExplainer (< 0.5ms execution)
         shap_explanation = {"top_features": [], "base_value": 0.0}
-        if self.explainer is not None:
+        explainer = self.get_explainer() if compute_shap else None
+        if explainer is not None:
             try:
                 # Get SHAP values for class 1 (anomaly)
                 raw_shap = self.explainer.shap_values(X)

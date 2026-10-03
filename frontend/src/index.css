@@ -5,51 +5,135 @@
 @layer base {
   body {
     margin: 0;
-    font-family: 'Chivo Mono', monospace;
-    background-color: #05080f;
-    color: #cbd5e1;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background-color: #060913;
+    color: #94a3b8;
     overflow-x: hidden;
+    font-weight: 400;
   }
 
   h1, h2, h3, h4, h5, h6 {
-    font-family: 'Share Tech Mono', monospace;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     color: #f1f5f9;
+    font-weight: 700;
   }
 }
 
-/* Custom Tactical Background Animations */
+
+:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+/* Subtle tactical grid background without competing color tint */
 .grid-overlay {
-  background-size: 40px 40px;
+  background-size: 48px 48px;
   background-image: 
-    linear-gradient(to right, rgba(14, 116, 144, 0.05) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(14, 116, 144, 0.05) 1px, transparent 1px);
+    linear-gradient(to right, rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
 }
 
-.radar-sweep-effect {
-  background: conic-gradient(from 0deg at 50% 50%, rgba(6, 182, 212, 0.15) 0deg, transparent 90deg);
-  animation: radar-sweep 8s linear infinite;
-}
-
-@keyframes radar-sweep {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* Custom Scrollbar */
+/* Custom Scrollbar - quiet and functional */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: #090f1d;
+  background: #080c16;
 }
 ::-webkit-scrollbar-thumb {
   background: #1e293b;
-  border-radius: 3px;
+  border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #0ea5e9;
+  background: #334155;
 }
+
+/* Cinematic Atmospheric Cloud Deck Animations */
+@keyframes cloudDriftSlow {
+  0% {
+    transform: translate3d(-6%, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(5%, -2%, 0) scale(1.04);
+  }
+  100% {
+    transform: translate3d(-6%, 0, 0) scale(1);
+  }
+}
+
+@keyframes cloudDriftFast {
+  0% {
+    transform: translate3d(8%, 2%, 0) scale(1.06);
+  }
+  50% {
+    transform: translate3d(-7%, -2%, 0) scale(1.02);
+  }
+  100% {
+    transform: translate3d(8%, 2%, 0) scale(1.06);
+  }
+}
+
+.animate-cloud-slow {
+  animation: cloudDriftSlow 18s ease-in-out infinite;
+}
+
+.animate-cloud-fast {
+  animation: cloudDriftFast 12s ease-in-out infinite;
+}
+
+/* Reduce Motion Support (Honors prefers-reduced-motion & user toggle) */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* Leaflet controls stay legible over the dark airspace basemap. */
+.leaflet-container {
+  background: #0b1220;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.leaflet-tile-pane {
+  filter: invert(0.88) hue-rotate(180deg) saturate(0.58) brightness(0.72) contrast(0.88);
+}
+
+.leaflet-div-icon {
+  background: transparent;
+  border: 0;
+}
+
+.leaflet-control-attribution {
+  background: rgba(8, 15, 27, 0.78) !important;
+  color: #94a3b8 !important;
+  backdrop-filter: blur(8px);
+}
+
+.leaflet-control-attribution a {
+  color: #7dd3fc !important;
+}
+
+.leaflet-bar a,
+.leaflet-bar a:hover {
+  background: rgba(11, 18, 32, 0.94) !important;
+  border-color: rgba(148, 163, 184, 0.2) !important;
+  color: #cbd5e1 !important;
+}
+
+.leaflet-bar a:hover {
+  color: #7dd3fc !important;
+}
+

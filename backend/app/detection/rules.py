@@ -51,6 +51,22 @@ class RuleConfig(BaseModel):
         description="Minimum flight speed threshold required when airborne (on_ground is False)"
     )
 
+    # 5. Low Signal Confidence Check (Reported NIC + Spatial Displacement)
+    # Citation: RTCA DO-260B / FAA TSO-C166b standardizes the Navigation Integrity Category (NIC 0-11).
+    # Controlled civil airspace mandates NIC >= 7 (Containment Radius Rc < 0.2 NM / ~370 m).
+    # NIC < 7 indicates degraded satellite geometry, RF interference, or GPS receiver unlock.
+    # GPSJam.org uses this exact ADS-B self-reported integrity degradation to detect real-world GNSS jamming/spoofing zones.
+    # While degraded NIC alone can occur transiently (e.g., steep banking), low confidence coupled with
+    # a significant position jump indicates anomalous flight telemetry or deliberate spoofing.
+    min_reliable_nic: int = Field(
+        default=7,
+        description="Minimum acceptable Navigation Integrity Category (0-11). Below this indicates degraded GPS."
+    )
+    min_confidence_jump_km: float = Field(
+        default=10.0,
+        description="Minimum position displacement in km required alongside low NIC to trigger low_signal_confidence."
+    )
+
 
 # --- Helper Math Functions ---
 
@@ -87,8 +103,8 @@ def check_position_jump(
     """Compute haversine distance and implied speed. Flags values exceeding limits."""
     dt = (current_time - prev_time).total_seconds()
     
-    # Ignore out-of-order or simultaneous updates
-    if dt <= 0.0:
+    # Ignore out-of-order, simultaneous updates, or stale contacts (>120s gap)
+    if dt <= 0.0 or dt > 120.0:
         return False, None, {}
 
     dist = haversine_distance(prev_lat, prev_lon, current_lat, current_lon)
@@ -209,3 +225,48 @@ def check_altitude_velocity_mismatch(
             return True, reason, evidence
 
     return False, None, evidence
+
+
+def check_low_signal_confidence(
+    reported_nic: Optional[int],
+    current_lat: float,
+    current_lon: float,
+    prev_lat: Optional[float] = None,
+    prev_lon: Optional[float] = None,
+    config: RuleConfig = RuleConfig()
+) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+    """Flags when self-reported navigation accuracy is below threshold combined with significant position jump.
+
+    A low confidence signal alone is not sufficient to flag spoofing (satellite banking or poor GDOP
+    can transiently lower NIC). However, degraded confidence paired with significant spatial displacement
+    is a strong indicator of spoofing/jamming telemetry (as demonstrated by GPSJam.org).
+    """
+    evidence = {
+        "reported_nic": reported_nic,
+        "min_reliable_nic": config.min_reliable_nic,
+        "distance_km": None,
+        "min_confidence_jump_km": config.min_confidence_jump_km
+    }
+
+    if reported_nic is None:
+        return False, None, evidence
+
+    if reported_nic >= config.min_reliable_nic:
+        return False, None, evidence
+
+    # reported_nic < config.min_reliable_nic
+    if prev_lat is not None and prev_lon is not None:
+        dist = haversine_distance(prev_lat, prev_lon, current_lat, current_lon)
+        evidence["distance_km"] = dist
+
+        if dist > config.min_confidence_jump_km:
+            reason = (
+                f"Low signal confidence anomaly: self-reported NIC {reported_nic} is below reliable "
+                f"threshold ({config.min_reliable_nic}) combined with significant position displacement "
+                f"of {dist:.1f} km (threshold: {config.min_confidence_jump_km:.1f} km)."
+            )
+            return True, reason, evidence
+
+    return False, None, evidence
+
+

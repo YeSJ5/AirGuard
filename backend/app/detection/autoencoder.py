@@ -7,13 +7,28 @@ from typing import List, Dict, Any, Tuple
 
 # --- Ground Receivers Reference Database ---
 # Mapped coordinates for ground receiver station nodes
-MOCK_RECEIVERS = {
+GROUND_RECEIVERS = {
+    # US West Coast Stations
     "1": (37.7749, -122.4194),  # San Francisco
     "2": (37.8044, -122.2712),  # Oakland
     "3": (37.3382, -121.8863),  # San Jose
     "4": (38.5816, -121.4944),  # Sacramento
-    "5": (36.7783, -119.4179)   # Fresno
+    "5": (36.7783, -119.4179),  # Fresno
+    # Indian Regional Ground Receivers
+    "VIDP": (28.5562, 77.1000), # Delhi IGI
+    "VABB": (19.0896, 72.8656), # Mumbai CSMIA
+    "VOBL": (13.1986, 77.7066), # Bengaluru KIA
+    "VECC": (22.6547, 88.4467), # Kolkata NSCBIA
+    "VOHS": (17.2403, 78.4294), # Hyderabad RGIA
+    "VOMM": (12.9941, 80.1709), # Chennai MAA
+    "101": (28.5562, 77.1000),  # Delhi Ground Node
+    "102": (19.0896, 72.8656),  # Mumbai Ground Node
+    "103": (13.1986, 77.7066),  # Bangalore Ground Node
+    "104": (22.6547, 88.4467),  # Kolkata Ground Node
+    "105": (17.2403, 78.4294),  # Hyderabad Ground Node
+    "106": (12.9941, 80.1709)   # Chennai Ground Node
 }
+MOCK_RECEIVERS = GROUND_RECEIVERS  # Backward-compatible alias
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "autoencoder.pth")
 
@@ -55,19 +70,34 @@ class UnsupervisedAutoencoder:
                 pass
 
     def compute_anomaly_score(self, features: np.ndarray) -> float:
-        """Calculate reconstruction MSE and scale to 0-1 probability score.
+        """Calculate reconstruction MSE on normalized kinematic features and scale to 0-1 probability score.
 
-        Sigmoid-like scaling maps the range [0, inf) to [0, 1].
+        Feature scales:
+        - speed_var: normalized by typical cruise variance (50.0)
+        - heading_var: normalized by typical heading drift (50.0)
+        - alt_rate_var: normalized by vertical rate variance (20.0)
+        - time_diff: centered around typical 5s poll interval, bounded to [0, 1]
         """
-        tensor_features = torch.FloatTensor(features.reshape(1, -1))
+        # Feature normalization
+        spd_norm = min(5.0, float(features[0]) / 50.0)
+        hdg_norm = min(5.0, float(features[1]) / 50.0)
+        alt_norm = min(5.0, float(features[2]) / 20.0)
+        dt_val = float(features[3]) if len(features) > 3 else 5.0
+        dt_norm = min(3.0, max(0.0, (dt_val - 5.0) / 10.0))
+
+        norm_vector = np.array([spd_norm, hdg_norm, alt_norm, dt_norm], dtype=np.float32)
+        tensor_features = torch.FloatTensor(norm_vector.reshape(1, -1))
+
         with torch.no_grad():
             reconstructed = self.model(tensor_features)
             mse = torch.mean((tensor_features - reconstructed) ** 2).item()
 
-        # Scale MSE to [0, 1] range using an exponential decay curve.
-        # MSE of 0.0 -> score 0.0. High MSE -> asymptotes to 1.0.
-        anomaly_score = 1.0 - math.exp(-mse / 5.0)
-        return anomaly_score
+        # Calibrated exponential curve:
+        # Near-zero variance / nominal telemetry yields anomaly score ~0.02 - 0.08
+        # High kinematic anomalies scale cleanly towards 1.0
+        raw_score = 1.0 - math.exp(-mse / 1.5)
+        calibrated_score = max(0.01, min(1.0, (raw_score - 0.30) / 0.65))
+        return float(calibrated_score)
 
 
 # --- Trilateration Plausibility Check ---
@@ -84,7 +114,7 @@ def check_trilateration_plausibility(
     positions cannot satisfy the geometric ranges of multiple receivers.
     """
     # Exclude invalid or empty sensor values
-    valid_sensors = [s for s in sensors if s in MOCK_RECEIVERS]
+    valid_sensors = [str(s) for s in sensors if str(s) in MOCK_RECEIVERS]
 
     # Degrade gracefully if data is sparse
     if len(valid_sensors) < 2:
@@ -173,6 +203,6 @@ def combine_scores(
 
     # Ensure score is strictly bounded to [0.0, 1.0]
     combined_risk = min(1.0, max(0.0, combined_risk))
-    
     is_triggered = combined_risk >= threshold
+
     return combined_risk, is_triggered

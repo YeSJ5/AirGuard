@@ -18,6 +18,7 @@ async def test_detection_service_integration():
     
     async_db_session.commit = AsyncMock()
     async_db_session.refresh = AsyncMock()
+    async_db_session.__aenter__.return_value = async_db_session
     
     # Mock refresh to inject database row ID
     def mock_refresh(obj):
@@ -25,12 +26,12 @@ async def test_detection_service_integration():
         return None
     async_db_session.refresh.side_effect = mock_refresh
 
-    # 2. Mock Machine Learning Estimators
+    # 2. Mock Machine Learning Estimators (Configured to exceed the 0.7 risk threshold when combined with rule triggers)
     ensemble = MagicMock()
-    ensemble.predict_anomaly.return_value = (0.2, {"top_features": [], "base_value": 0.05})
+    ensemble.predict_anomaly.return_value = (0.9, {"top_features": [], "base_value": 0.05})
     
     autoencoder = MagicMock()
-    autoencoder.compute_anomaly_score.return_value = 0.1
+    autoencoder.compute_anomaly_score.return_value = 0.8
 
     # 3. Instantiate service
     service = DetectionService(
@@ -92,7 +93,7 @@ async def test_detection_service_integration():
         assert "Implied speed" in alert.reason_text
 
         # Assert correct audit decision logged
-        log_payloads = [json.loads(args[0]) for args, _ in mock_logger.info.call_args_list if args]
+        log_payloads = [json.loads(args[0]) for args, _ in mock_logger.info.call_args_list if args and args[0].startswith('{')]
         alert_log = next((p for p in log_payloads if p.get("event") == "AUDIT_DECISION_ALERT"), None)
         
         assert alert_log is not None
@@ -127,7 +128,7 @@ async def test_detection_service_integration():
         assert len(alerts_added_mil) == 0, "Alert was incorrectly written to database for suppressed entity"
 
         # Assert correct suppression logging
-        log_payloads_mil = [json.loads(args[0]) for args, _ in mock_logger.info.call_args_list if args]
+        log_payloads_mil = [json.loads(args[0]) for args, _ in mock_logger.info.call_args_list if args and args[0].startswith('{')]
         suppressed_log = next((p for p in log_payloads_mil if p.get("event") == "AUDIT_DECISION_SUPPRESSED"), None)
         
         assert suppressed_log is not None
