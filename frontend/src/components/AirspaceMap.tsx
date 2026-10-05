@@ -14,7 +14,9 @@ export interface Flight {
   heading: number; // degrees
   verticalRate?: number; // m/s
   trustScore: number; // 0-100
+  trust_score?: number | null;
   combined_risk_score?: number | null;
+  assessment_status?: string | null;
   signalStrength?: number; // dBm
   status: 'normal' | 'suspicious' | 'critical' | 'unassessed';
   lat: number;
@@ -55,17 +57,83 @@ interface AirspaceMapProps {
   route?: RouteOverlay | null;
 }
 
-// Draw crisp animated aircraft vector onto 2D Canvas
+// Calculate accurate status theme matching the map legend (Nominal: Cyan, Review: Amber, Critical: Red, Unassessed: Slate)
+function getFlightStatusTheme(flight: Flight) {
+  const trust = flight.trustScore ?? flight.trust_score;
+  const risk = flight.combined_risk_score;
+  const status = flight.status;
+  const assessment = flight.assessment_status;
+
+  const isCritical =
+    status === 'critical' ||
+    (typeof trust === 'number' && Number.isFinite(trust) && trust < 40) ||
+    (typeof risk === 'number' && Number.isFinite(risk) && risk >= 0.8);
+
+  const isReview =
+    status === 'suspicious' ||
+    assessment === 'REVIEW_REQUIRED' ||
+    (typeof trust === 'number' && Number.isFinite(trust) && trust >= 40 && trust < 70) ||
+    (typeof risk === 'number' && Number.isFinite(risk) && risk >= 0.65);
+
+  const isUnassessed =
+    status === 'unassessed' ||
+    assessment === 'INSUFFICIENT_EVIDENCE' ||
+    (!Number.isFinite(trust) && !Number.isFinite(risk) && status !== 'normal' && (status as string) !== 'nominal');
+
+  if (isCritical) {
+    return {
+      fill: '#ef4444', // Red / Critical
+      stroke: '#7f1d1d',
+      glow: 'rgba(239, 68, 68, 0.6)',
+      badgeDot: '#ef4444',
+      badgeBorder: 'rgba(239, 68, 68, 0.85)',
+      statusLabel: 'CRITICAL',
+    };
+  }
+
+  if (isReview) {
+    return {
+      fill: '#f59e0b', // Amber / Review
+      stroke: '#78350f',
+      glow: 'rgba(245, 158, 11, 0.55)',
+      badgeDot: '#f59e0b',
+      badgeBorder: 'rgba(245, 158, 11, 0.8)',
+      statusLabel: 'REVIEW',
+    };
+  }
+
+  if (isUnassessed) {
+    return {
+      fill: '#94a3b8', // Slate / Unassessed
+      stroke: '#334155',
+      glow: 'rgba(148, 163, 184, 0.3)',
+      badgeDot: '#94a3b8',
+      badgeBorder: 'rgba(148, 163, 184, 0.5)',
+      statusLabel: 'UNASSESSED',
+    };
+  }
+
+  // Nominal / Normal (Default Cyan)
+  return {
+    fill: '#38bdf8', // Cyan / Nominal
+    stroke: '#0369a1',
+    glow: 'rgba(56, 189, 248, 0.4)',
+    badgeDot: '#38bdf8',
+    badgeBorder: 'rgba(56, 189, 248, 0.6)',
+    statusLabel: 'NOMINAL',
+  };
+}
+
+// Draw crisp animated aircraft vector onto 2D Canvas with clear status coloration
 function drawAnimatedAircraft(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
   headingDeg: number,
   size: number,
-  color: string,
+  theme: ReturnType<typeof getFlightStatusTheme>,
   isSelected: boolean,
   isHovered: boolean,
-  status: string,
   timeSec: number
 ) {
   ctx.save();
@@ -93,17 +161,24 @@ function drawAnimatedAircraft(
     ctx.strokeStyle = 'rgba(56, 189, 248, 0.95)';
     ctx.lineWidth = 2;
     ctx.stroke();
-  } else if (status === 'critical') {
+  } else if (theme.statusLabel === 'CRITICAL') {
     const pulse = 0.5 + 0.5 * Math.sin(timeSec * 6);
     ctx.beginPath();
-    ctx.arc(0, 0, 14 + pulse * 6, 0, Math.PI * 2);
+    ctx.arc(0, 0, 13 + pulse * 7, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(239, 68, 68, ${0.4 + pulse * 0.5})`;
     ctx.lineWidth = 2;
     ctx.stroke();
+  } else if (theme.statusLabel === 'REVIEW') {
+    const pulse = 0.5 + 0.5 * Math.sin(timeSec * 4);
+    ctx.beginPath();
+    ctx.arc(0, 0, 12 + pulse * 5, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(245, 158, 11, ${0.35 + pulse * 0.4})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
   } else if (isHovered) {
     ctx.beginPath();
-    ctx.arc(0, 0, 16, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+    ctx.arc(0, 0, 15, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -136,41 +211,29 @@ function drawAnimatedAircraft(
   ctx.bezierCurveTo(-2.2, -12, -1.5, -15, 0, -15);
   ctx.closePath();
 
-  ctx.fillStyle = color;
+  // Vibrant fill according to threat status
+  ctx.fillStyle = theme.fill;
+  ctx.shadowColor = theme.glow;
+  ctx.shadowBlur = isSelected ? 12 : isHovered ? 8 : 4;
   ctx.fill();
-  ctx.strokeStyle = '#050b14';
-  ctx.lineWidth = 1.2;
+
+  // Clean dark outline
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#04070e';
+  ctx.lineWidth = 1.4;
   ctx.stroke();
-
-  // Navigation Strobe Beacons
-  const strobe = Math.sin(timeSec * 5) > 0.2;
-  if (strobe) {
-    ctx.beginPath();
-    ctx.arc(14, 7, 2, 0, Math.PI * 2);
-    ctx.fillStyle = '#22c55e';
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.arc(-14, 7, 2, 0, Math.PI * 2);
-    ctx.fillStyle = '#ef4444';
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.arc(0, 14.5, 1.8, 0, Math.PI * 2);
-    ctx.fillStyle = '#ffffff';
-    ctx.fill();
-  }
 
   ctx.restore();
 }
 
-// Draw crisp callsign badge with airline company name
+// Draw crisp callsign badge with airline company name and status indicator dot
 function drawCallsignAndCompanyBadge(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
   callsign: string,
   airlineName: string,
+  theme: ReturnType<typeof getFlightStatusTheme>,
   isSelected: boolean,
   showCompany: boolean
 ) {
@@ -184,14 +247,15 @@ function drawCallsignAndCompanyBadge(
     : callsign;
 
   const textWidth = ctx.measureText(labelText).width;
-  const paddingX = 5;
-  const badgeW = textWidth + paddingX * 2;
+  const dotWidth = 8;
+  const paddingX = 6;
+  const badgeW = textWidth + dotWidth + paddingX * 2;
   const badgeH = 15;
   const badgeX = x - badgeW / 2;
   const badgeY = y + 13;
 
   // Background Badge
-  ctx.fillStyle = isSelected ? 'rgba(15, 23, 42, 0.95)' : 'rgba(11, 18, 32, 0.88)';
+  ctx.fillStyle = isSelected ? 'rgba(15, 23, 42, 0.95)' : 'rgba(11, 18, 32, 0.92)';
   ctx.beginPath();
   if (ctx.roundRect) {
     ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 4);
@@ -200,16 +264,22 @@ function drawCallsignAndCompanyBadge(
   }
   ctx.fill();
 
-  // Border
-  ctx.strokeStyle = isSelected ? '#38bdf8' : 'rgba(255, 255, 255, 0.25)';
-  ctx.lineWidth = 1;
+  // Border colored by status
+  ctx.strokeStyle = isSelected ? '#38bdf8' : theme.badgeBorder;
+  ctx.lineWidth = isSelected ? 1.5 : 1;
   ctx.stroke();
+
+  // Status indicator dot
+  ctx.beginPath();
+  ctx.arc(badgeX + paddingX + 3, badgeY + badgeH / 2, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = theme.badgeDot;
+  ctx.fill();
 
   // Text
   ctx.fillStyle = isSelected ? '#38bdf8' : '#f8fafc';
-  ctx.textAlign = 'center';
+  ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.fillText(labelText, x, badgeY + badgeH / 2 + 0.5);
+  ctx.fillText(labelText, badgeX + paddingX + dotWidth + 1, badgeY + badgeH / 2 + 0.5);
   ctx.restore();
 }
 
@@ -384,43 +454,32 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
         continue;
       }
 
-      let color = '#38bdf8';
-      if (flight.status === 'critical') color = '#ef4444';
-      else if (flight.status === 'suspicious') color = '#f59e0b';
-      else if (flight.status === 'unassessed') color = '#94a3b8';
-
+      const theme = getFlightStatusTheme(flight);
       const heading = Number.isFinite(flight.heading) ? flight.heading : 0;
-      drawAnimatedAircraft(ctx, x, y, heading, baseSize, color, false, false, flight.status, timeSec);
+      drawAnimatedAircraft(ctx, x, y, heading, baseSize, theme, false, false, timeSec);
 
       if (showCallsigns && flight.callsign) {
         const airline = getAirlineDisplayName(flight.callsign);
-        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, false, showCompanyInTag);
+        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, theme, false, showCompanyInTag);
       }
     }
 
     // Draw hovered flight
     if (hoveredFlightToDraw) {
       const { flight, x, y } = hoveredFlightToDraw;
-      let color = '#38bdf8';
-      if (flight.status === 'critical') color = '#ef4444';
-      else if (flight.status === 'suspicious') color = '#f59e0b';
-      else if (flight.status === 'unassessed') color = '#94a3b8';
-
+      const theme = getFlightStatusTheme(flight);
       const heading = Number.isFinite(flight.heading) ? flight.heading : 0;
-      drawAnimatedAircraft(ctx, x, y, heading, baseSize + 4, color, false, true, flight.status, timeSec);
+      drawAnimatedAircraft(ctx, x, y, heading, baseSize + 4, theme, false, true, timeSec);
       if (flight.callsign) {
         const airline = getAirlineDisplayName(flight.callsign);
-        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, false, true);
+        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, theme, false, true);
       }
     }
 
     // Draw selected flight on top with animated target ring & verified breadcrumb trail
     if (selectedFlightToDraw) {
       const { flight, x, y } = selectedFlightToDraw;
-      let color = '#38bdf8';
-      if (flight.status === 'critical') color = '#ef4444';
-      else if (flight.status === 'suspicious') color = '#f59e0b';
-      else if (flight.status === 'unassessed') color = '#94a3b8';
+      const theme = getFlightStatusTheme(flight);
 
       const history = (flight.history || []).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
       if (history.length > 1) {
@@ -431,7 +490,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           if (j === 0) ctx.moveTo(hp.x, hp.y);
           else ctx.lineTo(hp.x, hp.y);
         }
-        ctx.strokeStyle = color === '#ef4444' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(6, 182, 212, 0.25)';
+        ctx.strokeStyle = theme.glow;
         ctx.lineWidth = 6;
         ctx.stroke();
 
@@ -442,7 +501,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           if (j === 0) ctx.moveTo(hp.x, hp.y);
           else ctx.lineTo(hp.x, hp.y);
         }
-        ctx.strokeStyle = color === '#ef4444' ? 'rgba(239, 68, 68, 0.95)' : 'rgba(56, 189, 248, 0.95)';
+        ctx.strokeStyle = theme.fill;
         ctx.lineWidth = 2;
         ctx.setLineDash([6, 4]);
         ctx.stroke();
@@ -454,7 +513,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           const hp = map.latLngToContainerPoint([history[j].lat, history[j].lng]);
           ctx.beginPath();
           ctx.arc(hp.x, hp.y, 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = j === 0 ? '#38bdf8' : 'rgba(56, 189, 248, 0.65)';
+          ctx.fillStyle = j === 0 ? theme.fill : 'rgba(56, 189, 248, 0.65)';
           ctx.fill();
         }
 
@@ -472,10 +531,10 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       }
 
       const heading = Number.isFinite(flight.heading) ? flight.heading : 0;
-      drawAnimatedAircraft(ctx, x, y, heading, baseSize + 6, color, true, false, flight.status, timeSec);
+      drawAnimatedAircraft(ctx, x, y, heading, baseSize + 6, theme, true, false, timeSec);
       if (flight.callsign) {
         const airline = getAirlineDisplayName(flight.callsign);
-        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, true, true);
+        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, theme, true, true);
       }
     }
   }, []);
