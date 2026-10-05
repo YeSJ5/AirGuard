@@ -3044,7 +3044,7 @@ export default function App() {
 
               {/* Detector Risk Overlay: sector legend and persisted score coverage */}
               {showConfidenceOverlay && (
-              <div className="absolute top-12 left-3 z-20 max-w-xs sm:max-w-sm bg-[#101a2b]/95 border border-slate-700 rounded-xl shadow-xl p-3 backdrop-blur-md text-xs font-mono select-none animate-fadeIn">
+                <div className="absolute bottom-16 left-4 z-20 max-w-xs sm:max-w-sm bg-[#101a2b]/95 border border-slate-700 rounded-xl shadow-xl p-3 backdrop-blur-md text-xs font-mono select-none animate-fadeIn">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-2">
                     <div className="flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
@@ -3125,10 +3125,10 @@ export default function App() {
               {!showConfidenceOverlay && (
                 <button
                   onClick={() => handleToggleConfidenceOverlay(true)}
-                  className="absolute top-12 left-3 z-20 bg-slate-950/90 border border-sky-500/40 text-sky-300 hover:text-sky-200 text-[10px] font-mono px-2 py-1 rounded shadow-lg flex items-center gap-1.5"
+                  className="absolute bottom-16 left-4 z-20 bg-slate-950/90 border border-sky-500/40 text-sky-300 hover:text-sky-200 text-[10px] font-mono px-2.5 py-1.5 rounded-xl shadow-xl flex items-center gap-1.5 hover:bg-sky-950/50 transition-all cursor-pointer"
                   title="Shows only sectors with persisted heuristic detector-risk scores."
                 >
-                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse" />
                   <span>DETECTOR RISK OVERLAY [OFF]</span>
                 </button>
               )}

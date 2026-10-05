@@ -349,6 +349,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const [nearbyStatus, setNearbyStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [isNearbyOpen, setIsNearbyOpen] = useState<boolean>(false);
   const [isLayerMenuOpen, setIsLayerMenuOpen] = useState<boolean>(false);
+  const [isRegionMenuOpen, setIsRegionMenuOpen] = useState<boolean>(false);
   const [quickFilter, setQuickFilter] = useState<'all' | 'flagged' | 'airborne'>('all');
 
   // Fullscreen & Right Sidebar state
@@ -984,67 +985,169 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           className="absolute inset-0 pointer-events-none z-[400] w-full h-full"
         />
 
-        {/* Top-Left Tactical HUD: Quick Regions & View Filters */}
-        <div className="airguard-map-controls absolute top-3 left-3 sm:top-4 sm:left-4 z-[450] max-w-[calc(100%-8rem)] sm:max-w-[calc(100%-22rem)] flex flex-col gap-2 pointer-events-auto">
-          {/* Region Quick Navigation */}
-          <div className="flex items-center gap-1.5 overflow-x-auto bg-[#070d1a]/92 backdrop-blur-xl px-2.5 py-1.5 rounded-xl shadow-xl border border-white/10 text-xs font-medium text-slate-200">
-            <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mr-1 shrink-0">Region</span>
-            {REGION_CENTERS.map((reg) => (
+        {/* Top Unified Tactical Header Bar (Clean, Non-Colliding) */}
+        <div className="airguard-map-controls absolute top-3 left-3 right-3 z-[450] flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 pointer-events-auto">
+          {/* Left: Region Select & Quick Filters */}
+          <div className="flex items-center gap-2 flex-wrap min-w-0">
+            {/* Region Dropdown */}
+            <div className="relative">
               <button
-                key={reg.name}
-                onClick={() => zoomToRegion(reg.name, reg.lat, reg.lng, reg.zoom)}
-                className={`px-2 py-1 rounded-lg transition-all font-semibold whitespace-nowrap text-xs cursor-pointer ${
-                  activeRegion === reg.name
-                    ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-400/50 shadow-[0_0_12px_rgba(6,182,212,0.3)]'
-                    : 'text-slate-300 hover:bg-white/10'
+                type="button"
+                onClick={() => setIsRegionMenuOpen((v) => !v)}
+                className="bg-[#070d1a]/95 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-cyan-500/40 backdrop-blur-xl px-2.5 py-1.5 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                title="Select Airspace Sector / Region"
+              >
+                <span>📍</span>
+                <span className="font-bold">{activeRegion}</span>
+                <span className="text-[10px] text-slate-400">▾</span>
+              </button>
+
+              {isRegionMenuOpen && (
+                <div className="absolute top-full left-0 mt-1.5 w-48 bg-[#081020]/98 border border-cyan-500/30 rounded-xl p-1.5 shadow-2xl backdrop-blur-2xl z-50 animate-in fade-in zoom-in-95 duration-100">
+                  {REGION_CENTERS.map((reg) => (
+                    <button
+                      key={reg.name}
+                      type="button"
+                      onClick={() => {
+                        zoomToRegion(reg.name, reg.lat, reg.lng, reg.zoom);
+                        setIsRegionMenuOpen(false);
+                      }}
+                      className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                        activeRegion === reg.name
+                          ? 'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40'
+                          : 'text-slate-300 hover:bg-white/10'
+                      }`}
+                    >
+                      <span>{reg.name}</span>
+                      {activeRegion === reg.name && <span className="text-cyan-400 font-bold">✓</span>}
+                    </button>
+                  ))}
+                  <div className="border-t border-white/10 my-1" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      centerAllFlights();
+                      setIsRegionMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <span>⤢</span>
+                    <span>Fit All Detected Aircraft</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Quick Filter Chips */}
+            <div className="flex items-center gap-1 bg-[#070d1a]/90 backdrop-blur-xl p-0.5 rounded-xl border border-white/10 text-[11px] font-mono">
+              <button
+                onClick={() => setQuickFilter('all')}
+                className={`px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                  quickFilter === 'all'
+                    ? 'bg-cyan-950/90 text-cyan-200 font-bold shadow-sm'
+                    : 'text-slate-400 hover:text-white'
                 }`}
               >
-                {reg.name}
+                All ({flights.length})
               </button>
-            ))}
-            <span className="text-slate-700">|</span>
-            <button
-              onClick={centerAllFlights}
-              className="px-2 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/35 hover:bg-emerald-500/25 transition-all font-semibold whitespace-nowrap flex items-center gap-1 cursor-pointer text-xs"
-              title="Center map to encompass all detected aircraft"
-            >
-              <span>⤢</span>
-              <span>Fit All</span>
-            </button>
+              <button
+                onClick={() => setQuickFilter('flagged')}
+                className={`px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                  quickFilter === 'flagged'
+                    ? 'bg-rose-950/90 text-rose-300 font-bold shadow-[0_0_8px_rgba(244,63,94,0.3)]'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Flagged ({criticalCount + reviewCount})
+              </button>
+              <button
+                onClick={() => setQuickFilter('airborne')}
+                className={`px-2 py-1 rounded-lg transition-all cursor-pointer hidden md:inline-block ${
+                  quickFilter === 'airborne'
+                    ? 'bg-sky-950/90 text-sky-200 font-bold'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Cruising (&gt;10k ft)
+              </button>
+            </div>
           </div>
 
-          {/* Quick Filter Chips */}
-          <div className="flex items-center gap-1.5 text-[11px] font-mono">
+          {/* Right: Map Style, Fullscreen, Live Count */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Map Layer Selector */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setIsLayerMenuOpen((v) => !v)}
+                aria-label="Select Map Style"
+                title="Change Map Style"
+                className="bg-[#070d1a]/92 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-white/10 hover:border-cyan-400/60 backdrop-blur-xl px-2.5 py-1.5 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1 cursor-pointer"
+              >
+                <span>🗺</span>
+                <span className="hidden sm:inline">{MAP_LAYERS[activeMapLayer].name}</span>
+                <span className="text-[10px] text-slate-400">▾</span>
+              </button>
+
+              {isLayerMenuOpen && (
+                <div className="absolute top-full right-0 mt-1.5 w-44 bg-[#081020]/98 border border-cyan-500/30 rounded-xl p-1.5 shadow-2xl backdrop-blur-2xl z-50 animate-in fade-in zoom-in-95 duration-100">
+                  {(Object.keys(MAP_LAYERS) as MapLayerType[]).map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => switchMapLayer(key)}
+                      className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                        activeMapLayer === key
+                          ? 'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40'
+                          : 'text-slate-300 hover:bg-white/10'
+                      }`}
+                    >
+                      <span>{MAP_LAYERS[key].name}</span>
+                      {activeMapLayer === key && <span className="text-cyan-400 font-bold">✓</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Fullscreen / Enlarge Map Button */}
             <button
-              onClick={() => setQuickFilter('all')}
-              className={`px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
-                quickFilter === 'all'
-                  ? 'bg-cyan-950/80 border-cyan-500/60 text-cyan-200 font-bold'
-                  : 'bg-[#0b1424]/80 border-white/10 text-slate-400 hover:text-white'
-              }`}
+              type="button"
+              onClick={toggleFullscreen}
+              aria-label={isExpanded ? 'Exit full screen map' : 'Enlarge map to full window'}
+              title={isExpanded ? 'Exit full screen (Esc)' : 'Enlarge map to full window'}
+              className="bg-[#070d1a]/92 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-cyan-500/40 hover:border-cyan-400/70 backdrop-blur-xl px-2.5 py-1.5 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1 cursor-pointer"
             >
-              All ({flights.length})
+              <span className="text-sm leading-none">{isExpanded ? '🗗' : '⛶'}</span>
+              <span className="hidden sm:inline">{isExpanded ? 'Exit Fullscreen' : 'Enlarge'}</span>
             </button>
-            <button
-              onClick={() => setQuickFilter('flagged')}
-              className={`px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
-                quickFilter === 'flagged'
-                  ? 'bg-rose-950/80 border-rose-500/60 text-rose-300 font-bold shadow-[0_0_10px_rgba(244,63,94,0.3)]'
-                  : 'bg-[#0b1424]/80 border-white/10 text-slate-400 hover:text-white'
-              }`}
-            >
-              Flagged ({criticalCount + reviewCount})
-            </button>
-            <button
-              onClick={() => setQuickFilter('airborne')}
-              className={`px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
-                quickFilter === 'airborne'
-                  ? 'bg-sky-950/80 border-sky-500/60 text-sky-200 font-bold'
-                  : 'bg-[#0b1424]/80 border-white/10 text-slate-400 hover:text-white'
-              }`}
-            >
-              Cruising (&gt;10k ft)
-            </button>
+
+            {/* Live Airspace Count Badge */}
+            <div className="bg-[#070d1a]/92 backdrop-blur-xl px-2.5 py-1.5 rounded-xl shadow-xl border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.6)] animate-pulse" />
+              <span className="hidden sm:inline">Live</span>
+              <span className="text-[11px] text-cyan-300 sm:border-l border-white/10 sm:pl-2 font-mono font-bold">
+                {flights.length.toLocaleString()}
+              </span>
+            </div>
+
+            {/* 3-Lines (Hamburger) Button in Fullscreen Mode */}
+            {isExpanded && !isSidebarOpen && (
+              <button
+                type="button"
+                onClick={() => setIsSidebarOpen(true)}
+                aria-label="Open flight details sidebar"
+                title="View flight details & aircraft list (3 lines)"
+                className="airguard-sidebar-toggle-btn bg-cyan-600/95 hover:bg-cyan-500 text-white border border-cyan-400/60 px-2.5 py-1.5 rounded-xl text-xs font-semibold shadow-[0_0_15px_rgba(6,182,212,0.4)] backdrop-blur-xl flex items-center gap-1.5 cursor-pointer transition-all hover:scale-105"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="3" y1="6" x2="21" y2="6" />
+                  <line x1="3" y1="12" x2="21" y2="12" />
+                  <line x1="3" y1="18" x2="21" y2="18" />
+                </svg>
+                <span className="hidden sm:inline">Details</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -1182,85 +1285,9 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           </div>
         )}
 
-        {/* Top-Right Control Toolbar */}
-        <div className="airguard-map-controls absolute top-3 right-3 sm:top-4 sm:right-4 z-[450] flex flex-col items-end gap-2 pointer-events-auto">
-          <div className="flex items-center gap-2">
-            {/* Map Layer Selector Button */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setIsLayerMenuOpen(v => !v)}
-                aria-label="Select Map Style"
-                title="Change Map Style"
-                className="bg-[#070d1a]/92 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-white/10 hover:border-cyan-400/60 backdrop-blur-xl px-2.5 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
-              >
-                <span>🗺</span>
-                <span className="hidden sm:inline">{MAP_LAYERS[activeMapLayer].name}</span>
-                <span className="text-[10px] text-slate-400">▾</span>
-              </button>
-
-              {isLayerMenuOpen && (
-                <div className="absolute top-full right-0 mt-1.5 w-44 bg-[#081020]/98 border border-cyan-500/30 rounded-xl p-1.5 shadow-2xl backdrop-blur-2xl z-50 animate-in fade-in zoom-in-95 duration-100">
-                  {(Object.keys(MAP_LAYERS) as MapLayerType[]).map((key) => (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => switchMapLayer(key)}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
-                        activeMapLayer === key
-                          ? 'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40'
-                          : 'text-slate-300 hover:bg-white/10'
-                      }`}
-                    >
-                      <span>{MAP_LAYERS[key].name}</span>
-                      {activeMapLayer === key && <span className="text-cyan-400 font-bold">✓</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Fullscreen / Enlarge Map Button */}
-            <button
-              type="button"
-              onClick={toggleFullscreen}
-              aria-label={isExpanded ? 'Exit full screen map' : 'Enlarge map to full window'}
-              title={isExpanded ? 'Exit full screen (Esc)' : 'Enlarge map to full window'}
-              className="bg-[#070d1a]/92 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-cyan-500/40 hover:border-cyan-400/70 backdrop-blur-xl px-3 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
-            >
-              <span className="text-sm leading-none">{isExpanded ? '🗗' : '⛶'}</span>
-              <span className="hidden sm:inline">{isExpanded ? 'Exit Fullscreen' : 'Enlarge Map'}</span>
-            </button>
-
-            {/* Live Airspace Count Badge */}
-            <div className="bg-[#070d1a]/92 backdrop-blur-xl px-3 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-2.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.6)] animate-pulse" />
-              <span>Live airspace</span>
-              <span className="text-[11px] text-cyan-300 border-l border-white/10 pl-2.5 font-mono font-bold">
-                {flights.length.toLocaleString()}
-              </span>
-            </div>
-
-            {/* 3-Lines (Hamburger) Button in Fullscreen Mode */}
-            {isExpanded && !isSidebarOpen && (
-              <button
-                type="button"
-                onClick={() => setIsSidebarOpen(true)}
-                aria-label="Open flight details sidebar"
-                title="View flight details & aircraft list (3 lines)"
-                className="airguard-sidebar-toggle-btn bg-cyan-600/95 hover:bg-cyan-500 text-white border border-cyan-400/60 px-3 py-2 rounded-xl text-xs font-semibold shadow-[0_0_15px_rgba(6,182,212,0.4)] backdrop-blur-xl flex items-center gap-2 cursor-pointer transition-all hover:scale-105"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="3" y1="6" x2="21" y2="6" />
-                  <line x1="3" y1="12" x2="21" y2="12" />
-                  <line x1="3" y1="18" x2="21" y2="18" />
-                </svg>
-                <span className="hidden sm:inline">Flight Details</span>
-              </button>
-            )}
-          </div>
-
-          {selectedFlight && (
+        {/* Follow Target Indicator (Positioned beneath top-right HUD) */}
+        {selectedFlight && (
+          <div className="airguard-map-controls absolute top-14 right-3 sm:top-14 sm:right-4 z-[450] pointer-events-auto">
             <button
               type="button"
               onClick={() => setFollowSelected((val) => !val)}
@@ -1273,8 +1300,8 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
             >
               {followSelected ? '◉ Following aircraft' : '○ Follow aircraft'}
             </button>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Tactile Map Zoom & Orientation Controller (Bottom Right) */}
         <div className="airguard-map-controls absolute bottom-4 right-4 z-[450] flex flex-col items-end gap-2 pointer-events-auto">
