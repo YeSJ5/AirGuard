@@ -1,8 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { formatObservedNumber } from '../utils/dataQuality';
+import { getAirlineDisplayName, getAirlineInfo } from '../utils/airlineDirectory';
 
-interface Flight {
+export interface Flight {
   id: string; // ICAO24
   callsign: string;
   squawk?: string;
@@ -11,8 +13,9 @@ interface Flight {
   heading: number; // degrees
   verticalRate?: number; // m/s
   trustScore: number; // 0-100
+  combined_risk_score?: number | null;
   signalStrength?: number; // dBm
-  status: 'normal' | 'suspicious' | 'critical';
+  status: 'normal' | 'suspicious' | 'critical' | 'unassessed';
   lat: number;
   lng: number;
   is_synthetic?: boolean;
@@ -22,6 +25,7 @@ interface Flight {
   last_seen_seconds_ago?: number;
   staleness_status?: string;
   history?: Array<{ lat: number; lng: number }>;
+  data_quality?: { observed_fields?: string[]; missing_fields?: string[] };
 }
 
 interface RouteOverlay {
@@ -35,7 +39,7 @@ interface UserLocation {
 }
 
 const distanceKm = (from: UserLocation, to: UserLocation) => {
-  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const radians = (degrees: number) => (degrees * Math.PI) / 180;
   const dLat = radians(to.lat - from.lat);
   const dLng = radians(to.lng - from.lng);
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(radians(from.lat)) * Math.cos(radians(to.lat)) * Math.sin(dLng / 2) ** 2;
@@ -50,18 +54,172 @@ interface AirspaceMapProps {
   route?: RouteOverlay | null;
 }
 
-// Crisp 2D aircraft SVG glyph
-const createAircraftSvg = (color: string, isSelected: boolean) => `
-<svg viewBox="0 0 32 32" width="${isSelected ? 32 : 26}" height="${isSelected ? 32 : 26}" style="filter: drop-shadow(0px 1px 2px rgba(0,0,0,0.45));">
-  <path 
-    d="M16 2 C15.2 2 14.5 3 14.5 4.5 L14.5 11.5 L4.5 17.5 L4.5 20.5 L14.5 16.5 L14.5 24 L11.5 26.5 L11.5 28.5 L16 27.2 L20.5 28.5 L20.5 26.5 L17.5 24 L17.5 16.5 L27.5 20.5 L27.5 17.5 L17.5 11.5 L17.5 4.5 C17.5 3 16.8 2 16 2 Z" 
-    fill="${color}" 
-    stroke="#1e293b" 
-    stroke-width="1.2" 
-    stroke-linejoin="round"
-  />
-</svg>
-`;
+// Draw crisp animated aircraft vector onto 2D Canvas
+function drawAnimatedAircraft(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  headingDeg: number,
+  size: number,
+  color: string,
+  isSelected: boolean,
+  isHovered: boolean,
+  status: string,
+  timeSec: number
+) {
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Animated Target Ripples on Selected Flight
+  if (isSelected) {
+    const pulsePhase1 = (timeSec * 1.5) % 1;
+    const pulsePhase2 = (timeSec * 1.5 + 0.5) % 1;
+
+    ctx.beginPath();
+    ctx.arc(0, 0, 14 + pulsePhase1 * 20, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(56, 189, 248, ${(1 - pulsePhase1) * 0.75})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, 14 + pulsePhase2 * 20, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(56, 189, 248, ${(1 - pulsePhase2) * 0.75})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, 15, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  } else if (status === 'critical') {
+    const pulse = 0.5 + 0.5 * Math.sin(timeSec * 6);
+    ctx.beginPath();
+    ctx.arc(0, 0, 14 + pulse * 6, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(239, 68, 68, ${0.4 + pulse * 0.5})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  } else if (isHovered) {
+    ctx.beginPath();
+    ctx.arc(0, 0, 16, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // Rotate to heading
+  ctx.rotate((headingDeg * Math.PI) / 180);
+  const s = size / 32;
+  ctx.scale(s, s);
+
+  // Jet Silhouette
+  ctx.beginPath();
+  ctx.moveTo(0, -15);
+  ctx.bezierCurveTo(1.5, -15, 2.2, -12, 2.2, -8);
+  ctx.lineTo(2.2, -1.5);
+  ctx.lineTo(14, 5.5);
+  ctx.lineTo(14, 8.5);
+  ctx.lineTo(2.2, 4.5);
+  ctx.lineTo(2.2, 11);
+  ctx.lineTo(6.5, 13.5);
+  ctx.lineTo(6.5, 15.5);
+  ctx.lineTo(0, 14.5);
+  ctx.lineTo(-6.5, 15.5);
+  ctx.lineTo(-6.5, 13.5);
+  ctx.lineTo(-2.2, 11);
+  ctx.lineTo(-2.2, 4.5);
+  ctx.lineTo(-14, 8.5);
+  ctx.lineTo(-14, 5.5);
+  ctx.lineTo(-2.2, -1.5);
+  ctx.lineTo(-2.2, -8);
+  ctx.bezierCurveTo(-2.2, -12, -1.5, -15, 0, -15);
+  ctx.closePath();
+
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = '#050b14';
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+
+  // Navigation Strobe Beacons
+  const strobe = Math.sin(timeSec * 5) > 0.2;
+  if (strobe) {
+    ctx.beginPath();
+    ctx.arc(14, 7, 2, 0, Math.PI * 2);
+    ctx.fillStyle = '#22c55e';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(-14, 7, 2, 0, Math.PI * 2);
+    ctx.fillStyle = '#ef4444';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(0, 14.5, 1.8, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+// Draw crisp callsign badge with airline company name
+function drawCallsignAndCompanyBadge(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  callsign: string,
+  airlineName: string,
+  isSelected: boolean,
+  showCompany: boolean
+) {
+  ctx.save();
+  ctx.font = isSelected
+    ? 'bold 11px "Share Tech Mono", monospace, sans-serif'
+    : '10px "Share Tech Mono", monospace, sans-serif';
+
+  const labelText = showCompany && airlineName && !airlineName.includes('Flight') && !airlineName.includes('Aircraft')
+    ? `${callsign} • ${airlineName}`
+    : callsign;
+
+  const textWidth = ctx.measureText(labelText).width;
+  const paddingX = 5;
+  const badgeW = textWidth + paddingX * 2;
+  const badgeH = 15;
+  const badgeX = x - badgeW / 2;
+  const badgeY = y + 13;
+
+  // Background Badge
+  ctx.fillStyle = isSelected ? 'rgba(15, 23, 42, 0.95)' : 'rgba(11, 18, 32, 0.88)';
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 4);
+  } else {
+    ctx.rect(badgeX, badgeY, badgeW, badgeH);
+  }
+  ctx.fill();
+
+  // Border
+  ctx.strokeStyle = isSelected ? '#38bdf8' : 'rgba(255, 255, 255, 0.25)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Text
+  ctx.fillStyle = isSelected ? '#38bdf8' : '#f8fafc';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(labelText, x, badgeY + badgeH / 2 + 0.5);
+  ctx.restore();
+}
+
+const REGION_CENTERS = [
+  { name: 'All India', lat: 21.5, lng: 78.9, zoom: 5 },
+  { name: 'Delhi (DEL)', lat: 28.5562, lng: 77.1, zoom: 10 },
+  { name: 'Mumbai (BOM)', lat: 19.0896, lng: 72.8656, zoom: 10 },
+  { name: 'Bengaluru (BLR)', lat: 13.1986, lng: 77.7066, zoom: 10 },
+  { name: 'Kolkata (CCU)', lat: 22.6547, lng: 88.4467, zoom: 10 },
+  { name: 'Chennai (MAA)', lat: 12.9941, lng: 80.1709, zoom: 10 },
+];
 
 export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   flights,
@@ -71,27 +229,45 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   route,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const markersRef = useRef<Map<string, L.Marker>>(new Map());
-  const markerVisualsRef = useRef<Map<string, string>>(new Map());
-  const latestFlightsRef = useRef<Map<string, Flight>>(new Map());
-  const [activeFloatingFlight, setActiveFloatingFlight] = useState<Flight | null>(null);
-  const [zoomLevel, setZoomLevel] = useState<number>(5);
-  const [followSelected, setFollowSelected] = useState(false);
-  const [nearbyLocation, setNearbyLocation] = useState<UserLocation | null>(null);
-  const [nearbyStatus, setNearbyStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const [isNearbyOpen, setIsNearbyOpen] = useState(false);
   const routeLayerRef = useRef<L.LayerGroup | null>(null);
   const nearbyLayerRef = useRef<L.LayerGroup | null>(null);
+
+  const [activeRegion, setActiveRegion] = useState<string>('All India');
+  const [activeFloatingFlight, setActiveFloatingFlight] = useState<Flight | null>(null);
+  const [hoveredFlight, setHoveredFlight] = useState<Flight | null>(null);
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+  const [followSelected, setFollowSelected] = useState<boolean>(false);
+  const [nearbyLocation, setNearbyLocation] = useState<UserLocation | null>(null);
+  const [nearbyStatus, setNearbyStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [isNearbyOpen, setIsNearbyOpen] = useState<boolean>(false);
+
+  const latestFlightsRef = useRef<Flight[]>(flights);
+  const latestSelectedFlightRef = useRef<Flight | null>(selectedFlight);
+  const latestHoveredFlightRef = useRef<Flight | null>(hoveredFlight);
+  const onSelectFlightRef = useRef(onSelectFlight);
+  const continuousAnimRef = useRef<number | null>(null);
   const previousSelectedIdRef = useRef<string | null>(null);
-  latestFlightsRef.current = new Map(flights.map(flight => [flight.id, flight]));
+
+  latestFlightsRef.current = flights;
+  latestSelectedFlightRef.current = selectedFlight;
+  latestHoveredFlightRef.current = hoveredFlight;
+  onSelectFlightRef.current = onSelectFlight;
+
+  // Nearby aircraft computation
   const nearbyFlights = useMemo(() => {
-    if (!nearbyLocation) return [];
-    return flights.map(flight => ({ flight, distance: distanceKm(nearbyLocation, { lat: flight.lat, lng: flight.lng }) }))
-      .filter(item => Number.isFinite(item.distance) && item.distance <= 120)
+    if (!nearbyLocation || !isNearbyOpen) return [];
+    return flights
+      .map((flight) => ({
+        flight,
+        distance: distanceKm(nearbyLocation, { lat: flight.lat, lng: flight.lng }),
+        airline: getAirlineDisplayName(flight.callsign),
+      }))
+      .filter((item) => Number.isFinite(item.distance) && item.distance <= 120)
       .sort((a, b) => a.distance - b.distance)
       .slice(0, 8);
-  }, [flights, nearbyLocation]);
+  }, [flights, nearbyLocation, isNearbyOpen]);
 
   const locateNearbyAircraft = () => {
     if (!navigator.geolocation) {
@@ -100,58 +276,278 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     }
     setNearbyStatus('loading');
     navigator.geolocation.getCurrentPosition(
-      position => {
+      (position) => {
         const location = { lat: position.coords.latitude, lng: position.coords.longitude };
         setNearbyLocation(location);
         setNearbyStatus('ready');
         mapRef.current?.flyTo([location.lat, location.lng], 7, { duration: 0.8 });
       },
       () => setNearbyStatus('error'),
-      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 10_000 },
+      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 10_000 }
     );
   };
 
-  // Initialize Leaflet 2D Map with clean light basemap
+  // High performance Canvas render loop with rock-solid transform stability
+  const renderCanvas = useCallback(() => {
+    const map = mapRef.current;
+    const canvas = canvasRef.current;
+    const container = mapContainerRef.current;
+    if (!map || !canvas || !container) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    if (width === 0 || height === 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const targetW = Math.round(width * dpr);
+    const targetH = Math.round(height * dpr);
+
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
+
+    // Explicitly reset transform matrix to DPR to prevent transform compounding & blinking
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    const mapBounds = map.getBounds().pad(0.1);
+    const zoom = map.getZoom();
+    const currentFlights = latestFlightsRef.current;
+    const currentSelected = latestSelectedFlightRef.current;
+    const currentHovered = latestHoveredFlightRef.current;
+    const timeSec = performance.now() * 0.001;
+
+    const baseSize = zoom >= 10 ? 28 : zoom >= 7 ? 24 : zoom >= 5 ? 20 : 16;
+    const showCallsigns = zoom >= 7;
+    const showCompanyInTag = zoom >= 9;
+
+    let selectedFlightToDraw: { flight: Flight; x: number; y: number } | null = null;
+    let hoveredFlightToDraw: { flight: Flight; x: number; y: number } | null = null;
+
+    for (let i = 0; i < currentFlights.length; i++) {
+      const flight = currentFlights[i];
+      if (typeof flight.lat !== 'number' || typeof flight.lng !== 'number' || isNaN(flight.lat) || isNaN(flight.lng)) {
+        continue;
+      }
+
+      const isSelected = currentSelected?.id === flight.id;
+      const isHovered = currentHovered?.id === flight.id;
+
+      if (!isSelected && !mapBounds.contains([flight.lat, flight.lng])) {
+        continue;
+      }
+
+      const point = map.latLngToContainerPoint([flight.lat, flight.lng]);
+      const x = point.x;
+      const y = point.y;
+
+      if (x < -60 || x > width + 60 || y < -60 || y > height + 60) {
+        continue;
+      }
+
+      if (isSelected) {
+        selectedFlightToDraw = { flight, x, y };
+        continue;
+      }
+      if (isHovered) {
+        hoveredFlightToDraw = { flight, x, y };
+        continue;
+      }
+
+      let color = '#38bdf8';
+      if (flight.status === 'critical') color = '#ef4444';
+      else if (flight.status === 'suspicious') color = '#f59e0b';
+      else if (flight.status === 'unassessed') color = '#94a3b8';
+
+      const heading = Number.isFinite(flight.heading) ? flight.heading : 0;
+      drawAnimatedAircraft(ctx, x, y, heading, baseSize, color, false, false, flight.status, timeSec);
+
+      if (showCallsigns && flight.callsign) {
+        const airline = getAirlineDisplayName(flight.callsign);
+        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, false, showCompanyInTag);
+      }
+    }
+
+    // Draw hovered flight
+    if (hoveredFlightToDraw) {
+      const { flight, x, y } = hoveredFlightToDraw;
+      let color = '#38bdf8';
+      if (flight.status === 'critical') color = '#ef4444';
+      else if (flight.status === 'suspicious') color = '#f59e0b';
+      else if (flight.status === 'unassessed') color = '#94a3b8';
+
+      const heading = Number.isFinite(flight.heading) ? flight.heading : 0;
+      drawAnimatedAircraft(ctx, x, y, heading, baseSize + 4, color, false, true, flight.status, timeSec);
+      if (flight.callsign) {
+        const airline = getAirlineDisplayName(flight.callsign);
+        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, false, true);
+      }
+    }
+
+    // Draw selected flight on top with animated target ring & verified breadcrumb trail
+    if (selectedFlightToDraw) {
+      const { flight, x, y } = selectedFlightToDraw;
+      let color = '#38bdf8';
+      if (flight.status === 'critical') color = '#ef4444';
+      else if (flight.status === 'suspicious') color = '#f59e0b';
+      else if (flight.status === 'unassessed') color = '#94a3b8';
+
+      const history = (flight.history || []).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+      if (history.length > 1) {
+        ctx.beginPath();
+        for (let j = 0; j < history.length; j++) {
+          const hp = map.latLngToContainerPoint([history[j].lat, history[j].lng]);
+          if (j === 0) ctx.moveTo(hp.x, hp.y);
+          else ctx.lineTo(hp.x, hp.y);
+        }
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.75)';
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([4, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      const heading = Number.isFinite(flight.heading) ? flight.heading : 0;
+      drawAnimatedAircraft(ctx, x, y, heading, baseSize + 6, color, true, false, flight.status, timeSec);
+      if (flight.callsign) {
+        const airline = getAirlineDisplayName(flight.callsign);
+        drawCallsignAndCompanyBadge(ctx, x, y, flight.callsign, airline, true, true);
+      }
+    }
+  }, []);
+
+  // Continuous animation loop for strobes and expanding sonar rings
+  useEffect(() => {
+    let animId: number;
+    const loop = () => {
+      renderCanvas();
+      animId = requestAnimationFrame(loop);
+    };
+    animId = requestAnimationFrame(loop);
+    continuousAnimRef.current = animId;
+    return () => {
+      cancelAnimationFrame(animId);
+      continuousAnimRef.current = null;
+    };
+  }, [renderCanvas]);
+
+  // Initialize Map
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
     const map = L.map(mapContainerRef.current, {
-      center: [21.5, 78.9], // Central India
+      center: [21.5, 78.9],
       zoom: 5,
       zoomControl: false,
       attributionControl: true,
-      minZoom: 4,
+      minZoom: 2,
       maxZoom: 18,
+      preferCanvas: true,
     });
 
-    // OpenStreetMap tiles are darkened locally so targets remain the visual focus.
-    const lightTiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     });
+    tileLayer.addTo(map);
 
-    lightTiles.addTo(map);
-
-    // Zoom control in bottom right
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-    map.on('zoomend', () => {
-      setZoomLevel(map.getZoom());
-    });
-
-    map.on('click', (e) => {
-      // Clicking on empty map area closes floating popup
-      const target = e.originalEvent?.target as HTMLElement;
-      if (!target?.closest('.leaflet-marker-icon') && !target?.closest('.airguard-floating-label')) {
-        setActiveFloatingFlight(null);
-      }
-    });
-
-    mapRef.current = map;
     routeLayerRef.current = L.layerGroup().addTo(map);
     nearbyLayerRef.current = L.layerGroup().addTo(map);
+    mapRef.current = map;
+
+    // Invalidate map size after mounting
+    setTimeout(() => {
+      map.invalidateSize();
+      renderCanvas();
+    }, 50);
+
+    const container = map.getContainer();
+    const handleMouseMove = (e: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const currentFlights = latestFlightsRef.current;
+      let found: Flight | null = null;
+      let minDistSq = 22 * 22;
+
+      for (let i = 0; i < currentFlights.length; i++) {
+        const f = currentFlights[i];
+        if (typeof f.lat !== 'number' || typeof f.lng !== 'number') continue;
+        const pt = map.latLngToContainerPoint([f.lat, f.lng]);
+        const dx = pt.x - mouseX;
+        const dy = pt.y - mouseY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < minDistSq) {
+          minDistSq = distSq;
+          found = f;
+        }
+      }
+
+      if (found) {
+        container.style.cursor = 'pointer';
+        setHoveredFlight(found);
+        setHoverPos({ x: mouseX, y: mouseY });
+      } else {
+        container.style.cursor = '';
+        setHoveredFlight(null);
+        setHoverPos(null);
+      }
+    };
+
+    const handleClick = (e: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const currentFlights = latestFlightsRef.current;
+      let clicked: Flight | null = null;
+      let minDistSq = 24 * 24;
+
+      for (let i = 0; i < currentFlights.length; i++) {
+        const f = currentFlights[i];
+        if (typeof f.lat !== 'number' || typeof f.lng !== 'number') continue;
+        const pt = map.latLngToContainerPoint([f.lat, f.lng]);
+        const dx = pt.x - mouseX;
+        const dy = pt.y - mouseY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < minDistSq) {
+          minDistSq = distSq;
+          clicked = f;
+        }
+      }
+
+      if (clicked) {
+        onSelectFlightRef.current?.(clicked);
+        setActiveFloatingFlight(clicked);
+      } else {
+        const target = e.target as HTMLElement;
+        if (!target?.closest('.airguard-floating-card')) {
+          setActiveFloatingFlight(null);
+        }
+      }
+    };
+
+    container.addEventListener('mousemove', handleMouseMove);
+    container.addEventListener('click', handleClick);
+
+    const onResize = () => {
+      map.invalidateSize();
+      renderCanvas();
+    };
+    window.addEventListener('resize', onResize);
 
     return () => {
+      container.removeEventListener('mousemove', handleMouseMove);
+      container.removeEventListener('click', handleClick);
+      window.removeEventListener('resize', onResize);
+      if (continuousAnimRef.current) cancelAnimationFrame(continuousAnimRef.current);
       map.remove();
       mapRef.current = null;
       routeLayerRef.current = null;
@@ -160,233 +556,235 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   }, []);
 
   useEffect(() => {
-    const layer = nearbyLayerRef.current;
-    if (!layer) return;
-    layer.clearLayers();
-    if (!nearbyLocation) return;
-    L.circle([nearbyLocation.lat, nearbyLocation.lng], {
-      radius: 120_000, color: '#67e8f9', weight: 1, opacity: 0.65,
-      fillColor: '#22d3ee', fillOpacity: 0.035, dashArray: '5 7',
-    }).addTo(layer);
-    L.circleMarker([nearbyLocation.lat, nearbyLocation.lng], {
-      radius: 6, color: '#cffafe', weight: 2, fillColor: '#06b6d4', fillOpacity: 1,
-    }).bindTooltip('Your location · stored in this browser only', { direction: 'top' }).addTo(layer);
-  }, [nearbyLocation]);
+    const map = mapRef.current;
+    if (!map || !selectedFlight) {
+      previousSelectedIdRef.current = selectedFlight?.id ?? null;
+      return;
+    }
+    const changed = previousSelectedIdRef.current !== selectedFlight.id;
+    previousSelectedIdRef.current = selectedFlight.id;
+    if (changed || followSelected) {
+      map.flyTo([selectedFlight.lat, selectedFlight.lng], Math.max(map.getZoom(), 7), {
+        duration: changed ? 0.6 : 0.25,
+      });
+    }
+  }, [selectedFlight, followSelected]);
 
-  // Show the selected aircraft's verified route endpoints and observed position history.
   useEffect(() => {
     const layer = routeLayerRef.current;
     if (!layer) return;
     layer.clearLayers();
-    if (!selectedFlight) return;
-    const history = (selectedFlight.history || []).filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
-    if (history.length > 1) {
-      L.polyline([...history].reverse().map(p => [p.lat, p.lng] as [number, number]), {
-        color: '#38bdf8', weight: 3, opacity: 0.85,
-      }).addTo(layer);
-    }
-    if (route?.origin && route?.destination) {
-      L.polyline([[route.origin.lat, route.origin.lng], [route.destination.lat, route.destination.lng]], {
-        color: '#a5b4fc', weight: 2, opacity: 0.8, dashArray: '7 8',
-      }).addTo(layer);
-      for (const [point, label, color] of [[route.origin, `Origin · ${route.origin.label}`, '#34d399'], [route.destination, `Destination · ${route.destination.label}`, '#a5b4fc']] as const) {
-        L.circleMarker([point.lat, point.lng], { radius: 5, color, weight: 2, fillColor: '#0b1220', fillOpacity: 1 })
-          .bindTooltip(label, { direction: 'top' }).addTo(layer);
+    if (!route?.origin || !route?.destination) return;
+
+    L.polyline(
+      [
+        [route.origin.lat, route.origin.lng],
+        [route.destination.lat, route.destination.lng],
+      ],
+      {
+        color: '#a5b4fc',
+        weight: 2,
+        opacity: 0.8,
+        dashArray: '7 8',
       }
+    ).addTo(layer);
+
+    for (const [point, label, color] of [
+      [route.origin, `Origin · ${route.origin.label}`, '#34d399'],
+      [route.destination, `Destination · ${route.destination.label}`, '#a5b4fc'],
+    ] as const) {
+      L.circleMarker([point.lat, point.lng], {
+        radius: 5,
+        color,
+        weight: 2,
+        fillColor: '#0b1220',
+        fillOpacity: 1,
+      })
+        .bindTooltip(label, { direction: 'top' })
+        .addTo(layer);
     }
-  }, [selectedFlight, route]);
+  }, [route]);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !selectedFlight) { previousSelectedIdRef.current = selectedFlight?.id ?? null; return; }
-    const changed = previousSelectedIdRef.current !== selectedFlight.id;
-    previousSelectedIdRef.current = selectedFlight.id;
-    if (changed || followSelected) {
-      map.flyTo([selectedFlight.lat, selectedFlight.lng], Math.max(map.getZoom(), 7), { duration: changed ? 0.65 : 0.25 });
-    }
-  }, [selectedFlight?.id, selectedFlight?.lat, selectedFlight?.lng, followSelected]);
+    const layer = nearbyLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+    if (!nearbyLocation) return;
 
-  // Update markers smoothly on aircraft churn
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
+    L.circle([nearbyLocation.lat, nearbyLocation.lng], {
+      radius: 120_000,
+      color: '#67e8f9',
+      weight: 1,
+      opacity: 0.65,
+      fillColor: '#22d3ee',
+      fillOpacity: 0.035,
+      dashArray: '5 7',
+    }).addTo(layer);
 
-    const currentFlightIds = new Set<string>();
+    L.circleMarker([nearbyLocation.lat, nearbyLocation.lng], {
+      radius: 6,
+      color: '#cffafe',
+      weight: 2,
+      fillColor: '#06b6d4',
+      fillOpacity: 1,
+    })
+      .bindTooltip('Your location · stored in this browser only', { direction: 'top' })
+      .addTo(layer);
+  }, [nearbyLocation]);
 
-    flights.forEach((flight) => {
-      if (typeof flight.lat !== 'number' || typeof flight.lng !== 'number' || isNaN(flight.lat) || isNaN(flight.lng)) {
-        return;
-      }
-
-      currentFlightIds.add(flight.id);
-      const isSelected = selectedFlight?.id === flight.id;
-      const isFloatingActive = activeFloatingFlight?.id === flight.id;
-
-      // Calm cyan for normal traffic; reserve warm colors for elevated risk.
-      let glyphColor = '#67e8f9';
-      if (flight.status === 'critical') glyphColor = '#ef4444'; // Red alert
-      else if (flight.status === 'suspicious') glyphColor = '#f97316'; // Amber warning
-      else if (isSelected) glyphColor = '#0284c7'; // Active blue
-
-      const heading = flight.heading || 0;
-      const showCallsignLabel = zoomLevel >= 8 || isSelected || isFloatingActive;
-      const visualKey = `${heading}|${glyphColor}|${isSelected}|${showCallsignLabel}|${flight.callsign}`;
-
-      const htmlContent = `
-        <div class="airguard-aircraft-container" role="img" aria-label="${flight.callsign || 'Aircraft'}" style="position: relative; display: flex; flex-direction: column; align-items: center; pointer-events: auto; cursor: pointer;">
-          <div class="airguard-glyph" style="transform: rotate(${heading}deg); transform-origin: center; transition: transform 0.4s ease;">
-            ${createAircraftSvg(glyphColor, isSelected)}
-          </div>
-          ${showCallsignLabel ? `
-            <div class="airguard-callsign-tag" style="
-              margin-top: 1px;
-              background: rgba(15, 23, 42, 0.88);
-              color: ${isSelected ? '#38bdf8' : '#f8fafc'};
-              font-family: 'Share Tech Mono', monospace, sans-serif;
-              font-size: 10px;
-              font-weight: 700;
-              padding: 1px 4px;
-              border-radius: 3px;
-              border: 1px solid ${isSelected ? '#38bdf8' : 'rgba(255,255,255,0.2)'};
-              white-space: nowrap;
-              box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-              letter-spacing: 0.5px;
-            ">
-              ${flight.callsign}
-            </div>
-          ` : ''}
-        </div>
-      `;
-
-      const existingMarker = markersRef.current.get(flight.id);
-
-      if (existingMarker) {
-        const position = existingMarker.getLatLng();
-        if (position.lat !== flight.lat || position.lng !== flight.lng) existingMarker.setLatLng([flight.lat, flight.lng]);
-        if (markerVisualsRef.current.get(flight.id) !== visualKey) {
-          existingMarker.setIcon(L.divIcon({
-            className: 'airguard-marker-custom',
-            html: htmlContent,
-            iconSize: isSelected ? [36, 46] : [30, 40],
-            iconAnchor: isSelected ? [18, 18] : [15, 15],
-          }));
-          markerVisualsRef.current.set(flight.id, visualKey);
-        }
-      } else {
-        const newMarker = L.marker([flight.lat, flight.lng], {
-          icon: L.divIcon({
-            className: 'airguard-marker-custom',
-            html: htmlContent,
-            iconSize: isSelected ? [36, 46] : [30, 40],
-            iconAnchor: isSelected ? [18, 18] : [15, 15],
-          }),
-          zIndexOffset: isSelected ? 1000 : 100,
-        });
-
-        newMarker.on('click', (e) => {
-          L.DomEvent.stopPropagation(e);
-          const latestFlight = latestFlightsRef.current.get(flight.id) || flight;
-          setActiveFloatingFlight(latestFlight);
-          onSelectFlight(latestFlight);
-        });
-
-        newMarker.addTo(map);
-        markersRef.current.set(flight.id, newMarker);
-        markerVisualsRef.current.set(flight.id, visualKey);
-      }
-    });
-
-    // Remove old stale markers cleanly (zero memory leak under high churn)
-    markersRef.current.forEach((marker, id) => {
-      if (!currentFlightIds.has(id)) {
-        map.removeLayer(marker);
-        markersRef.current.delete(id);
-        markerVisualsRef.current.delete(id);
-      }
-    });
-  }, [flights, selectedFlight, activeFloatingFlight, zoomLevel, onSelectFlight]);
-
-  // Keep active floating flight data up-to-date
   useEffect(() => {
     if (activeFloatingFlight) {
       const updated = flights.find((f) => f.id === activeFloatingFlight.id);
-      if (updated) {
+      if (
+        updated &&
+        (updated.lat !== activeFloatingFlight.lat ||
+          updated.lng !== activeFloatingFlight.lng ||
+          updated.altitude !== activeFloatingFlight.altitude ||
+          updated.speed !== activeFloatingFlight.speed ||
+          updated.heading !== activeFloatingFlight.heading ||
+          updated.trustScore !== activeFloatingFlight.trustScore ||
+          updated.status !== activeFloatingFlight.status)
+      ) {
         setActiveFloatingFlight(updated);
       }
     }
-  }, [flights]);
+  }, [flights, activeFloatingFlight]);
 
-  // Handle Quick City/Region Zoom
-  const zoomToRegion = (lat: number, lng: number, zoom: number) => {
+  const zoomToRegion = (regionName: string, lat: number, lng: number, zoom: number) => {
+    setActiveRegion(regionName);
     if (mapRef.current) {
-      mapRef.current.flyTo([lat, lng], zoom, { duration: 1.0 });
+      mapRef.current.flyTo([lat, lng], zoom, { duration: 0.8 });
     }
   };
 
+  const centerAllFlights = () => {
+    const map = mapRef.current;
+    if (!map || flights.length === 0) return;
+    const validFlights = flights.filter((f) => Number.isFinite(f.lat) && Number.isFinite(f.lng));
+    if (validFlights.length === 0) return;
+
+    const bounds = L.latLngBounds(validFlights.map((f) => [f.lat, f.lng]));
+    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 8 });
+    setActiveRegion('Auto Fit');
+  };
+
+  const hoveredAirline = hoveredFlight ? getAirlineInfo(hoveredFlight.callsign) : null;
+  const activeAirline = activeFloatingFlight ? getAirlineInfo(activeFloatingFlight.callsign) : null;
+
   return (
     <div className="relative w-full h-full bg-[#0b1220] overflow-hidden select-none">
-      {/* 2D Leaflet Map Canvas */}
+      {/* 2D Leaflet Map Container */}
       <div ref={mapContainerRef} className="w-full h-full z-0" />
 
+      {/* Hardware-Accelerated Viewport Canvas Overlay (Positioned above map tiles, zIndex 400) */}
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 pointer-events-none z-[400] w-full h-full"
+      />
+
       {/* Quick Region Navigation Bar */}
-      <div className="absolute top-4 left-4 z-[400] max-w-[calc(100%-2rem)] flex items-center gap-1.5 overflow-x-auto bg-[#0b1220]/90 backdrop-blur-xl px-2.5 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-medium text-slate-200">
+      <div className="absolute top-4 left-4 z-[450] max-w-[calc(100%-2rem)] flex items-center gap-1.5 overflow-x-auto bg-[#0b1220]/90 backdrop-blur-xl px-2.5 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-medium text-slate-200">
         <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mr-1 shrink-0">Region</span>
-        <button
-          onClick={() => zoomToRegion(21.5, 78.9, 5)}
-          className="px-2.5 py-1.5 rounded-lg bg-sky-400/10 text-sky-200 hover:bg-sky-400/20 transition-colors font-semibold whitespace-nowrap"
-        >
-          All India
-        </button>
+        {REGION_CENTERS.map((reg) => (
+          <button
+            key={reg.name}
+            onClick={() => zoomToRegion(reg.name, reg.lat, reg.lng, reg.zoom)}
+            className={`px-2.5 py-1.5 rounded-lg transition-all font-semibold whitespace-nowrap ${
+              activeRegion === reg.name
+                ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40 shadow-[0_0_10px_rgba(6,182,212,0.25)]'
+                : 'text-slate-300 hover:bg-white/10'
+            }`}
+          >
+            {reg.name}
+          </button>
+        ))}
         <span className="text-slate-700">|</span>
         <button
-          onClick={() => zoomToRegion(28.5562, 77.1000, 10)}
-          className="px-2.5 py-1.5 rounded-lg text-slate-300 hover:bg-white/10 transition-colors whitespace-nowrap"
+          onClick={centerAllFlights}
+          className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 transition-all font-semibold whitespace-nowrap flex items-center gap-1"
+          title="Center map to encompass all detected aircraft"
         >
-          Delhi (DEL)
-        </button>
-        <button
-          onClick={() => zoomToRegion(19.0896, 72.8656, 10)}
-          className="px-2.5 py-1.5 rounded-lg text-slate-300 hover:bg-white/10 transition-colors whitespace-nowrap"
-        >
-          Mumbai (BOM)
-        </button>
-        <button
-          onClick={() => zoomToRegion(13.1986, 77.7066, 10)}
-          className="px-2.5 py-1.5 rounded-lg text-slate-300 hover:bg-white/10 transition-colors whitespace-nowrap"
-        >
-          Bengaluru (BLR)
-        </button>
-        <button
-          onClick={() => zoomToRegion(22.6547, 88.4467, 10)}
-          className="px-2.5 py-1.5 rounded-lg text-slate-300 hover:bg-white/10 transition-colors whitespace-nowrap"
-        >
-          Kolkata (CCU)
-        </button>
-        <button
-          onClick={() => zoomToRegion(12.9941, 80.1709, 10)}
-          className="px-2.5 py-1.5 rounded-lg text-slate-300 hover:bg-white/10 transition-colors whitespace-nowrap"
-        >
-          Chennai (MAA)
+          <span>⤢</span>
+          <span>Fit All</span>
         </button>
       </div>
 
-      {/* Floating Lightweight Flight Label Card (Click-to-Label, instant, no heavy drawer animation) */}
+      {/* Hover Tooltip with Company/Airline Name */}
+      {hoveredFlight && hoverPos && !activeFloatingFlight && (
+        <div
+          className="pointer-events-none absolute z-[550] -translate-x-1/2 -translate-y-full mb-2 bg-[#0b1220]/95 border border-cyan-500/40 rounded-xl px-3 py-2 shadow-2xl backdrop-blur-md text-white font-mono text-[11px] whitespace-nowrap animate-in fade-in duration-100"
+          style={{ left: hoverPos.x, top: hoverPos.y - 14 }}
+        >
+          <div className="flex items-center gap-2">
+            <span
+              className={`w-2.5 h-2.5 rounded-full ${
+                hoveredFlight.status === 'critical'
+                  ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.8)]'
+                  : hoveredFlight.status === 'suspicious'
+                  ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.8)]'
+                  : 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]'
+              }`}
+            />
+            <span className="font-bold text-slate-100 text-xs">{hoveredFlight.callsign || 'UNKNOWN'}</span>
+            {hoveredAirline && hoveredAirline.name && (
+              <span
+                className="text-[10px] font-sans font-semibold px-1.5 py-0.5 rounded text-white"
+                style={{ backgroundColor: `${hoveredAirline.color}33`, borderColor: `${hoveredAirline.color}88`, borderWidth: '1px' }}
+              >
+                {hoveredAirline.name}
+              </span>
+            )}
+            <span className="text-slate-400 text-[10px]">({hoveredFlight.id.toUpperCase()})</span>
+          </div>
+          <div className="text-[10px] text-slate-300 mt-1 flex items-center gap-2">
+            <span>Alt: {formatObservedNumber(hoveredFlight.data_quality, 'altitude', hoveredFlight.altitude)} ft</span>
+            <span>•</span>
+            <span>Spd: {formatObservedNumber(hoveredFlight.data_quality, 'velocity', hoveredFlight.speed)} kt</span>
+            <span>•</span>
+            <span className="text-cyan-300">
+              Trust: {Number.isFinite(hoveredFlight.trustScore) ? `${hoveredFlight.trustScore}%` : 'N/A'}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Lightweight Flight Label Card */}
       {activeFloatingFlight && (
-        <div className="absolute bottom-5 left-5 z-[500] bg-[#0b1220]/95 backdrop-blur-xl text-white border border-white/10 rounded-2xl p-4 shadow-2xl shadow-black/40 w-[min(21rem,calc(100%-2.5rem))] animate-in fade-in slide-in-from-bottom-3 duration-200">
+        <div className="airguard-floating-card absolute bottom-5 left-5 z-[500] bg-[#0b1220]/95 backdrop-blur-xl text-white border border-white/15 rounded-2xl p-4 shadow-2xl shadow-black/60 w-[min(23rem,calc(100%-2.5rem))] animate-in fade-in slide-in-from-bottom-3 duration-150">
           <div className="flex items-center justify-between border-b border-white/10 pb-2.5 mb-3">
             <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${activeFloatingFlight.status === 'critical' ? 'bg-rose-400' : activeFloatingFlight.status === 'suspicious' ? 'bg-amber-400' : 'bg-emerald-400'}`} />
-              <span className="font-mono text-base font-bold tracking-wide text-white">
-                {activeFloatingFlight.callsign}
-              </span>
-              <span className="text-[10px] font-mono text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">
-                {activeFloatingFlight.id.toUpperCase()}
-              </span>
+              <span
+                className={`w-2.5 h-2.5 rounded-full ${
+                  activeFloatingFlight.status === 'critical'
+                    ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.6)]'
+                    : activeFloatingFlight.status === 'suspicious'
+                    ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.6)]'
+                    : activeFloatingFlight.status === 'normal'
+                    ? 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.6)]'
+                    : 'bg-slate-500'
+                }`}
+              />
+              <div className="flex flex-col">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-base font-bold tracking-wide text-white">
+                    {activeFloatingFlight.callsign || 'N/A'}
+                  </span>
+                  <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/60 border border-cyan-500/30 px-1.5 py-0.2 rounded">
+                    {activeFloatingFlight.id.toUpperCase()}
+                  </span>
+                </div>
+                {activeAirline && (
+                  <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1 mt-0.5">
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: activeAirline.color }} />
+                    {activeAirline.name} {activeAirline.country ? `(${activeAirline.country})` : ''}
+                  </span>
+                )}
+              </div>
             </div>
             <button
               onClick={() => setActiveFloatingFlight(null)}
-              className="text-slate-400 hover:text-white text-lg leading-none px-1"
-              title="Close"
+              className="text-slate-400 hover:text-white text-lg leading-none px-1 transition-colors"
+              title="Close card"
             >
               &times;
             </button>
@@ -396,89 +794,204 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
             <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
               <div className="text-[9px] uppercase tracking-wider text-slate-400">Altitude</div>
               <div className="font-mono font-bold text-slate-100">
-                {Math.round(activeFloatingFlight.altitude).toLocaleString()} <span className="text-[10px] font-normal text-slate-400">FT</span>
+                {formatObservedNumber(activeFloatingFlight.data_quality, 'altitude', activeFloatingFlight.altitude)}{' '}
+                <span className="text-[10px] font-normal text-slate-400">FT</span>
               </div>
             </div>
             <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
               <div className="text-[9px] uppercase tracking-wider text-slate-400">Speed</div>
               <div className="font-mono font-bold text-slate-100">
-                {Math.round(activeFloatingFlight.speed)} <span className="text-[10px] font-normal text-slate-400">KT</span>
+                {formatObservedNumber(activeFloatingFlight.data_quality, 'velocity', activeFloatingFlight.speed)}{' '}
+                <span className="text-[10px] font-normal text-slate-400">KT</span>
               </div>
             </div>
             <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
-              <div className="text-[9px] uppercase tracking-wider text-slate-400">Trust</div>
-              <div className={`font-mono font-bold ${
-                activeFloatingFlight.trustScore >= 80 ? 'text-emerald-400' :
-                activeFloatingFlight.trustScore >= 50 ? 'text-amber-400' : 'text-rose-400'
-              }`}>
-                {activeFloatingFlight.trustScore}%
+              <div className="text-[9px] uppercase tracking-wider text-slate-400">Trust Index</div>
+              <div
+                className={`font-mono font-bold ${
+                  !Number.isFinite(activeFloatingFlight.trustScore)
+                    ? 'text-slate-400'
+                    : activeFloatingFlight.trustScore >= 70
+                    ? 'text-emerald-400'
+                    : activeFloatingFlight.trustScore >= 40
+                    ? 'text-amber-400'
+                    : 'text-rose-400'
+                }`}
+              >
+                {Number.isFinite(activeFloatingFlight.trustScore) ? `${activeFloatingFlight.trustScore}%` : 'UNASSESSED'}
               </div>
             </div>
           </div>
 
-          {/* Secondary Action: Open Full Detail Panel */}
           <button
             onClick={() => {
               onOpenFlightDetails(activeFloatingFlight);
             }}
-            className="w-full py-1.5 px-3 bg-cyan-600 hover:bg-cyan-500 active:bg-cyan-700 text-white text-xs font-semibold rounded-lg shadow transition-all flex items-center justify-center gap-1.5"
+            className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-900/30 transition-all flex items-center justify-center gap-1.5"
           >
-            <span>View Full Details &amp; ADS-B Security</span>
+            <span>Inspect Telemetry &amp; Detection Matrix</span>
             <span className="text-sm">→</span>
           </button>
         </div>
       )}
 
-      {/* Map Mode Indicator */}
-      <div className="absolute top-[4.25rem] sm:top-4 right-3 sm:right-4 z-[400] bg-[#0b1220]/90 backdrop-blur-xl px-3 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-2.5">
-        <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.55)]" />
-        <span>Live airspace</span>
-        <span className="text-[11px] text-slate-400 border-l border-white/10 pl-2.5 font-mono">
-          {flights.length.toLocaleString()} aircraft
+      {/* Live Airspace Count & Follow Button */}
+      <div className="absolute top-[4.25rem] sm:top-4 right-3 sm:right-4 z-[450] flex flex-col items-end gap-2">
+        <div className="bg-[#0b1220]/90 backdrop-blur-xl px-3 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-2.5">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.55)] animate-pulse" />
+          <span>Live airspace</span>
+          <span className="text-[11px] text-slate-400 border-l border-white/10 pl-2.5 font-mono">
+            {flights.length.toLocaleString()} aircraft
+          </span>
+        </div>
+
+        {selectedFlight && (
+          <button
+            type="button"
+            onClick={() => setFollowSelected((val) => !val)}
+            aria-pressed={followSelected}
+            className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur-xl transition-all ${
+              followSelected
+                ? 'border-cyan-400/50 bg-cyan-950/90 text-cyan-200 shadow-[0_0_12px_rgba(6,182,212,0.3)]'
+                : 'border-white/10 bg-[#0b1220]/90 text-slate-300 hover:text-white'
+            }`}
+          >
+            {followSelected ? '◉ Following aircraft' : '○ Follow aircraft'}
+          </button>
+        )}
+      </div>
+
+      {/* Signal Status Legend */}
+      <div className="absolute bottom-4 right-4 z-[450] hidden sm:flex items-center gap-3 bg-[#0b1220]/85 backdrop-blur-xl px-3 py-2 rounded-xl border border-white/10 text-[10px] text-slate-300 shadow-lg">
+        <span className="font-semibold text-slate-500 uppercase tracking-wider">Status</span>
+        <span className="flex items-center gap-1.5">
+          <i className="w-2 h-2 rounded-full bg-sky-400 inline-block shadow-[0_0_6px_rgba(56,189,248,0.5)]" />
+          Nominal
+        </span>
+        <span className="flex items-center gap-1.5">
+          <i className="w-2 h-2 rounded-full bg-amber-400 inline-block shadow-[0_0_6px_rgba(245,158,11,0.5)]" />
+          Review
+        </span>
+        <span className="flex items-center gap-1.5">
+          <i className="w-2 h-2 rounded-full bg-rose-400 inline-block shadow-[0_0_6px_rgba(244,63,94,0.5)]" />
+          Critical
         </span>
       </div>
 
-      {selectedFlight && <button type="button" onClick={() => setFollowSelected(value => !value)} aria-pressed={followSelected}
-        className={`absolute top-[7.25rem] right-3 sm:top-[4.5rem] sm:right-4 z-[400] rounded-lg border px-3 py-2 text-[11px] font-semibold shadow-lg backdrop-blur-xl ${followSelected ? 'border-cyan-400/50 bg-cyan-950/90 text-cyan-200' : 'border-white/10 bg-[#0b1220]/90 text-slate-300 hover:text-white'}`}>
-        {followSelected ? 'Following aircraft' : 'Follow aircraft'}
-      </button>}
-
-      <div className="absolute bottom-4 right-4 z-[400] hidden sm:flex items-center gap-3 bg-[#0b1220]/85 backdrop-blur-xl px-3 py-2 rounded-xl border border-white/10 text-[10px] text-slate-300 shadow-lg">
-        <span className="font-semibold text-slate-500 uppercase tracking-wider">Signal status</span>
-        <span className="flex items-center gap-1.5"><i className="w-1.5 h-1.5 rounded-full bg-violet-400" />Demo</span>
-        <span className="flex items-center gap-1.5"><i className="w-1.5 h-1.5 rounded-full bg-sky-400" />Nominal</span>
-        <span className="flex items-center gap-1.5"><i className="w-1.5 h-1.5 rounded-full bg-amber-400" />Review</span>
-        <span className="flex items-center gap-1.5"><i className="w-1.5 h-1.5 rounded-full bg-rose-400" />Critical</span>
-      </div>
-
-      <div className="absolute bottom-4 left-4 z-[450] w-[min(21rem,calc(100%-2rem))]">
-        {isNearbyOpen && <section className="mb-2 overflow-hidden rounded-xl border border-slate-700/80 bg-[#08111f]/[.97] shadow-2xl backdrop-blur-xl" aria-label="Nearby aircraft">
-          <div className="flex items-center justify-between border-b border-white/10 px-3.5 py-3">
-            <div><h2 className="m-0 text-sm font-semibold text-white">Aircraft near me</h2><p className="m-0 mt-0.5 text-[10px] text-slate-400">Live reports within 120 km · sorted by distance</p></div>
-            <button type="button" onClick={() => setIsNearbyOpen(false)} aria-label="Close nearby aircraft" className="px-2 text-lg text-slate-400 hover:text-white">×</button>
-          </div>
-          <div className="max-h-64 overflow-y-auto p-2.5">
-            {!nearbyLocation && <div className="px-1 py-2">
-              <p className="m-0 text-xs leading-relaxed text-slate-300">Use your device location to see which reported aircraft are closest to you.</p>
-              <p className="mb-3 mt-1.5 text-[10px] leading-relaxed text-slate-500">Location is used in this browser only. AirGuard does not send it to the server.</p>
-              <button type="button" onClick={locateNearbyAircraft} disabled={nearbyStatus === 'loading'} className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-60">{nearbyStatus === 'loading' ? 'Finding your location…' : 'Use my location'}</button>
-              {nearbyStatus === 'error' && <p role="status" className="mb-0 mt-2 text-[10px] text-amber-300">Location is unavailable. Allow location access and try again, or check browser location settings.</p>}
-            </div>}
-            {nearbyLocation && <>
-              <div className="flex items-center justify-between px-1 pb-2 text-[10px] text-slate-400"><span>{nearbyFlights.length} nearby report{nearbyFlights.length === 1 ? '' : 's'} found</span><button type="button" onClick={locateNearbyAircraft} className="text-cyan-300 hover:text-cyan-100">Refresh location</button></div>
-              {nearbyFlights.length === 0 ? <p className="px-1 py-3 text-xs text-slate-400">No aircraft reports within 120 km in the current feed. Coverage and transponder visibility vary by area.</p> : nearbyFlights.map(({ flight, distance }) => {
-                const stale = flight.staleness_status === 'STALE' || (flight.last_seen_seconds_ago ?? 0) > 20;
-                return <button key={flight.id} type="button" onClick={() => { onSelectFlight(flight); setFollowSelected(true); }} className="mb-1.5 flex w-full items-center justify-between gap-3 rounded-lg border border-white/[.08] bg-white/[.03] px-3 py-2 text-left hover:border-cyan-500/40 hover:bg-cyan-500/[.06]">
-                  <span className="min-w-0"><span className="block truncate text-xs font-semibold text-slate-100">{flight.callsign || 'Unknown callsign'}</span><span className="mt-0.5 block text-[10px] text-slate-400">{Math.round(flight.altitude).toLocaleString()} ft · {stale ? `last report ${Math.round(flight.last_seen_seconds_ago ?? 0)}s ago` : 'recent report'}</span></span>
-                  <span className="shrink-0 text-right"><span className="block font-mono text-xs font-semibold text-cyan-200">{distance < 10 ? distance.toFixed(1) : Math.round(distance)} km</span><span className="text-[9px] text-slate-500">ground distance</span></span>
-                </button>;
-              })}
-            </>}
-          </div>
-        </section>}
-        <button type="button" onClick={() => { setIsNearbyOpen(open => !open); setActiveFloatingFlight(null); }} aria-expanded={isNearbyOpen} className="flex items-center gap-2 rounded-lg border border-white/15 bg-[#0b1220]/95 px-3 py-2.5 text-xs font-semibold text-slate-100 shadow-xl backdrop-blur-xl hover:border-cyan-400/50 hover:text-cyan-100">
-          <span aria-hidden="true" className="text-cyan-300">◎</span>Aircraft near me
-          {nearbyLocation && <span className="rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[9px] text-cyan-200">{nearbyFlights.length}</span>}
+      {/* Geolocation / Nearby Aircraft Drawer */}
+      <div className="absolute bottom-4 left-4 z-[450] w-[min(22rem,calc(100%-2rem))]">
+        {isNearbyOpen && (
+          <section
+            className="mb-2 overflow-hidden rounded-xl border border-slate-700/80 bg-[#08111f]/[.97] shadow-2xl backdrop-blur-xl"
+            aria-label="Nearby aircraft"
+          >
+            <div className="flex items-center justify-between border-b border-white/10 px-3.5 py-3">
+              <div>
+                <h2 className="m-0 text-sm font-semibold text-white">Aircraft near me</h2>
+                <p className="m-0 mt-0.5 text-[10px] text-slate-400">Live reports within 120 km · sorted by distance</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsNearbyOpen(false)}
+                aria-label="Close nearby aircraft"
+                className="px-2 text-lg text-slate-400 hover:text-white"
+              >
+                ×
+              </button>
+            </div>
+            <div className="max-h-64 overflow-y-auto p-2.5">
+              {!nearbyLocation && (
+                <div className="px-1 py-2">
+                  <p className="m-0 text-xs leading-relaxed text-slate-300">
+                    Use your device location to see which reported aircraft are closest to you.
+                  </p>
+                  <p className="mb-3 mt-1.5 text-[10px] leading-relaxed text-slate-500">
+                    Location is used in this browser only. AirGuard does not send it to the server.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={locateNearbyAircraft}
+                    disabled={nearbyStatus === 'loading'}
+                    className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-60"
+                  >
+                    {nearbyStatus === 'loading' ? 'Finding your location…' : 'Use my location'}
+                  </button>
+                  {nearbyStatus === 'error' && (
+                    <p role="status" className="mb-0 mt-2 text-[10px] text-amber-300">
+                      Location is unavailable. Allow location access and try again, or check browser location settings.
+                    </p>
+                  )}
+                </div>
+              )}
+              {nearbyLocation && (
+                <>
+                  <div className="flex items-center justify-between px-1 pb-2 text-[10px] text-slate-400">
+                    <span>
+                      {nearbyFlights.length} nearby report{nearbyFlights.length === 1 ? '' : 's'} found
+                    </span>
+                    <button type="button" onClick={locateNearbyAircraft} className="text-cyan-300 hover:text-cyan-100">
+                      Refresh location
+                    </button>
+                  </div>
+                  {nearbyFlights.length === 0 ? (
+                    <p className="px-1 py-3 text-xs text-slate-400">
+                      No aircraft reports within 120 km in the current feed. Coverage and transponder visibility vary by area.
+                    </p>
+                  ) : (
+                    nearbyFlights.map(({ flight, distance, airline }) => {
+                      const stale = flight.staleness_status === 'STALE';
+                      return (
+                        <button
+                          key={flight.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectFlight(flight);
+                            setFollowSelected(true);
+                          }}
+                          className="mb-1.5 flex w-full items-center justify-between gap-3 rounded-lg border border-white/[.08] bg-white/[.03] px-3 py-2 text-left hover:border-cyan-500/40 hover:bg-cyan-500/[.06]"
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate text-xs font-semibold text-slate-100">
+                              {airline && !airline.includes('Flight') ? `${airline} (${flight.callsign || 'N/A'})` : flight.callsign || 'Unknown'}
+                            </span>
+                            <span className="mt-0.5 block text-[10px] text-slate-400">
+                              {formatObservedNumber(flight.data_quality, 'altitude', flight.altitude)} ft ·{' '}
+                              {stale ? `last report ${Math.round(flight.last_seen_seconds_ago ?? 0)}s ago` : 'recent report'}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-right">
+                            <span className="block font-mono text-xs font-semibold text-cyan-200">
+                              {distance < 10 ? distance.toFixed(1) : Math.round(distance)} km
+                            </span>
+                            <span className="text-[9px] text-slate-500">ground distance</span>
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </>
+              )}
+            </div>
+          </section>
+        )}
+        <button
+          type="button"
+          onClick={() => {
+            setIsNearbyOpen((open) => !open);
+            setActiveFloatingFlight(null);
+          }}
+          aria-expanded={isNearbyOpen}
+          className="flex items-center gap-2 rounded-lg border border-white/15 bg-[#0b1220]/95 px-3 py-2.5 text-xs font-semibold text-slate-100 shadow-xl backdrop-blur-xl hover:border-cyan-400/50 hover:text-cyan-100"
+        >
+          <span aria-hidden="true" className="text-cyan-300">
+            ◎
+          </span>
+          Aircraft near me
+          {nearbyLocation && (
+            <span className="rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[9px] text-cyan-200">
+              {nearbyFlights.length}
+            </span>
+          )}
         </button>
       </div>
     </div>

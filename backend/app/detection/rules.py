@@ -51,20 +51,17 @@ class RuleConfig(BaseModel):
         description="Minimum flight speed threshold required when airborne (on_ground is False)"
     )
 
-    # 5. Low Signal Confidence Check (Reported NIC + Spatial Displacement)
-    # Citation: RTCA DO-260B / FAA TSO-C166b standardizes the Navigation Integrity Category (NIC 0-11).
-    # Controlled civil airspace mandates NIC >= 7 (Containment Radius Rc < 0.2 NM / ~370 m).
-    # NIC < 7 indicates degraded satellite geometry, RF interference, or GPS receiver unlock.
-    # GPSJam.org uses this exact ADS-B self-reported integrity degradation to detect real-world GNSS jamming/spoofing zones.
-    # While degraded NIC alone can occur transiently (e.g., steep banking), low confidence coupled with
-    # a significant position jump indicates anomalous flight telemetry or deliberate spoofing.
+    # 5. Optional navigation-integrity input + spatial displacement.
+    # The configured OpenSky REST state-vector feed does not provide NIC, so this
+    # rule remains unassessed for that source unless an adapter supplies a
+    # documented, provenance-preserving measurement.
     min_reliable_nic: int = Field(
         default=7,
-        description="Minimum acceptable Navigation Integrity Category (0-11). Below this indicates degraded GPS."
+        description="Optional minimum NIC threshold when a configured source provides documented NIC evidence."
     )
     min_confidence_jump_km: float = Field(
         default=10.0,
-        description="Minimum position displacement in km required alongside low NIC to trigger low_signal_confidence."
+        description="Minimum displacement required alongside an available low-NIC observation to trigger the optional rule."
     )
 
 

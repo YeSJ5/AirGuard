@@ -1,34 +1,18 @@
 import pytest
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, func
-from app.core.database import Base, engine, async_session_maker
 from app.models import AircraftState, Alert
 from app.tasks.retention import run_retention
 
-async def check_db_connection() -> bool:
-    try:
-        async with engine.connect() as conn:
-            from sqlalchemy import text
-            await conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
-
 @pytest.mark.asyncio
-async def test_retention_downsampling():
-    if not await check_db_connection():
-        pytest.skip("PostgreSQL database is offline. Skipping retention integration test.")
-
-    # 1. Recreate database tables to ensure clean state
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+async def test_retention_downsampling(isolated_postgres_schema):
+    connection, sessions = isolated_postgres_schema
 
     now = datetime.now(timezone.utc)
     old_time = now - timedelta(days=35)
     new_time = now - timedelta(days=5)
 
-    async with async_session_maker() as session:
+    async with sessions() as session:
         # 2. Insert 20 unlinked old states (should be subject to downsampling)
         for i in range(20):
             state = AircraftState(
@@ -98,12 +82,12 @@ async def test_retention_downsampling():
         await session.commit()
 
     # 5. Execute in DRY RUN mode (verify no deletions happen)
-    dry_deleted_count = await run_retention(days=30, dry_run=True)
+    dry_deleted_count = await run_retention(days=30, dry_run=True, connection=connection)
     
     # 20 old unlinked records, keeping 1-in-10 (keep sequence 1 and 11), so 18 should be candidates for deletion
     assert dry_deleted_count == 18, f"Expected 18 candidates for deletion, found {dry_deleted_count}"
 
-    async with async_session_maker() as session:
+    async with sessions() as session:
         count_res = await session.execute(
             select(func.count(AircraftState.id)).where(AircraftState.icao24.in_(["OLD111", "LNK222", "NEW333"]))
         )
@@ -111,11 +95,11 @@ async def test_retention_downsampling():
         assert total_count_before == 26, "Dry-run should not delete any records."
 
     # 6. Execute in ACTIVE mode
-    actual_deleted_count = await run_retention(days=30, dry_run=False)
+    actual_deleted_count = await run_retention(days=30, dry_run=False, connection=connection)
     assert actual_deleted_count == 18
 
     # 7. Assert database records count and integrity
-    async with async_session_maker() as session:
+    async with sessions() as session:
         # Check total remaining test states
         count_res = await session.execute(
             select(func.count(AircraftState.id)).where(AircraftState.icao24.in_(["OLD111", "LNK222", "NEW333"]))

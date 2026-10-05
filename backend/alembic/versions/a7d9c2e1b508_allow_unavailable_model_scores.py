@@ -21,13 +21,14 @@ def upgrade() -> None:
     op.alter_column("alerts", "ensemble_score", existing_type=sa.Float(), nullable=True)
     op.alter_column("alerts", "autoencoder_score", existing_type=sa.Float(), nullable=True)
     op.add_column("aircraft_states", sa.Column("data_quality", sa.dialects.postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")))
+    op.add_column("aircraft_states", sa.Column("squawk", sa.String(length=8), nullable=True))
     op.create_table(
         "aircraft_assessments",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("aircraft_state_id", sa.BigInteger(), nullable=False),
         sa.Column("icao24", sa.String(length=6), nullable=False),
         sa.Column("combined_risk_score", sa.Float(), nullable=True),
-        sa.Column("evidence_confidence", sa.Float(), nullable=False),
+        sa.Column("rule_assessment_coverage", sa.Float(), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("signals", sa.dialects.postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("detector_version", sa.String(length=32), nullable=False),
@@ -44,6 +45,7 @@ def downgrade() -> None:
     op.drop_index("ix_aircraft_assessments_assessed_at", table_name="aircraft_assessments")
     op.drop_index("ix_aircraft_assessments_icao24", table_name="aircraft_assessments")
     op.drop_table("aircraft_assessments")
+    op.drop_column("aircraft_states", "squawk")
     op.drop_column("aircraft_states", "data_quality")
     # The old schema required model values. Downgrade intentionally fails when
     # unavailable values exist rather than rewriting unknown outputs as zero.

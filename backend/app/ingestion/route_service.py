@@ -9,7 +9,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.ingestion.opensky_auth import opensky_auth
 from app.models import FlightRoute
 
 logger = logging.getLogger("airguard.routes")
@@ -115,40 +115,12 @@ class FlightRouteService:
         # In-memory fast cache: icao24 -> dict of route info
         self._memory_cache: Dict[str, Dict[str, Any]] = {}
         
-        # Track icaos currently being fetched or queued
-        self._in_flight: set = set()
         self._semaphore = asyncio.Semaphore(1)  # Serialized OpenSky route requests to prevent 429
         self._rate_limited_until: float = 0.0
-
-        # Background paced resolution queue
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._worker_task = asyncio.create_task(self._process_queue())
+        self._last_request_at: float = 0.0
 
         # HTTP client
-        auth = None
-        if settings.OPENSKY_USERNAME and settings.OPENSKY_PASSWORD:
-            auth = httpx.BasicAuth(settings.OPENSKY_USERNAME, settings.OPENSKY_PASSWORD)
-        self.http_client = httpx.AsyncClient(timeout=6.0, auth=auth)
-
-    async def _process_queue(self):
-        """Background consumer that processes route resolutions at a controlled, respectful pace."""
-        while True:
-            try:
-                icao, callsign = await self._queue.get()
-                now = time.time()
-                if now < self._rate_limited_until:
-                    sleep_dur = self._rate_limited_until - now + 1.0
-                    await asyncio.sleep(sleep_dur)
-
-                await self.get_or_fetch_route(icao, callsign)
-                self._queue.task_done()
-                # Respectful 2.5 second inter-request pacing for OpenSky flight endpoint
-                await asyncio.sleep(2.5)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[OPENSKY ROUTE] Queue worker error: {e}")
-                await asyncio.sleep(2.5)
+        self.http_client = httpx.AsyncClient(timeout=6.0)
 
     def get_cached_route(self, icao24: str) -> Optional[Dict[str, Any]]:
         return self._memory_cache.get(icao24.lower().strip())
@@ -255,7 +227,7 @@ class FlightRouteService:
             }
 
         now = int(now_ts)
-        time_window = 86400 if (settings.OPENSKY_USERNAME and settings.OPENSKY_PASSWORD) else 7200
+        time_window = 86400 if opensky_auth.configured else 7200
         begin = now - time_window  # 24 hours for authenticated OpenSky, 2 hours for anonymous
         url = f"https://opensky-network.org/api/flights/aircraft?icao24={icao}&begin={begin}&end={now}"
 
@@ -268,8 +240,12 @@ class FlightRouteService:
 
         async with self._semaphore:
             try:
+                pacing_wait = 2.5 - (time.monotonic() - self._last_request_at)
+                if pacing_wait > 0:
+                    await asyncio.sleep(pacing_wait)
+                self._last_request_at = time.monotonic()
                 logger.info(f"[OPENSKY ROUTE] Fetching route for newly-tracked aircraft {icao.upper()}...")
-                res = await self.http_client.get(url)
+                res = await opensky_auth.request(self.http_client, "GET", url)
                 if res.status_code == 200:
                     flights = res.json()
                     if isinstance(flights, list) and len(flights) > 0:
@@ -350,12 +326,3 @@ class FlightRouteService:
             logger.debug(f"DB route insert race condition handled for {icao}: {e}")
 
         return route_data
-
-    async def schedule_route_resolution(self, icao24: str, callsign: Optional[str] = None):
-        """Asynchronously schedule a route lookup into the paced background queue."""
-        icao = icao24.lower().strip()
-        if icao in self._memory_cache or icao in self._in_flight:
-            return
-        
-        self._in_flight.add(icao)
-        await self._queue.put((icao, callsign))

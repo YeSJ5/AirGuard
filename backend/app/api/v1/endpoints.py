@@ -1,14 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status, Response
+import asyncio
 import json
 import logging
 logger = logging.getLogger("airguard.api")
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from typing import List, Optional
+from sqlalchemy import select, func, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import selectinload
+from redis.exceptions import RedisError
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
+import math
 from fastapi.responses import StreamingResponse
+from fastapi.encoders import jsonable_encoder
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -18,20 +25,41 @@ from reportlab.lib import colors
 from app.core.database import get_db
 from app.core.limiter import limiter
 from app.core.config import settings
-from app.models import AircraftAssessment, AircraftState, Alert, ModelRun, User, AuditLog
+from app.ingestion.opensky_auth import opensky_auth
+from app.models import (
+    AircraftAssessment, AircraftState, Alert, ModelRun, User, AuditLog,
+    AirspaceEventCase, AirspaceEventCaseReview
+)
 from app.api.schemas import (
     AircraftStateResponse, AlertResponse, ModelRunResponse, SystemHealthResponse,
     UserRegister, UserLogin, UserResponse, TokenResponse, AuditLogResponse,
     TrustHistoryPoint, AircraftTrustHistoryResponse, FlightRouteResponse,
-    AircraftDetailResponse, AircraftIdentityResponse, AircraftTrustDetailResponse, AircraftStalenessResponse
+    AircraftDetailResponse, AircraftIdentityResponse, AircraftTrustDetailResponse,
+    AircraftStalenessResponse, AirspaceEventCandidate, AirspaceEventCaseCreate,
+    AirspaceEventCaseUpdate, AirspaceEventCaseResponse
 )
-from app.detection.trust import compute_weighted_rolling_trust, classify_trust_pattern
+from app.detection.trust import (
+    derive_trust_score,
+    compute_weighted_rolling_trust,
+    classify_trust_pattern,
+    compute_weighted_rolling_risk,
+    classify_risk_pattern
+)
 from app.core.security import verify_password, create_access_token, get_password_hash
 from app.api.deps import get_current_user, require_viewer, require_analyst, require_admin, get_websocket_user
 
 router = APIRouter()
 
+active_detection_service = None
+active_ingestion_service = None
 active_route_service = None
+
+def _invalid_body(field: str, message: str) -> HTTPException:
+    """Return manual validation errors in FastAPI's documented 422 shape."""
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=[{"loc": ["body", field], "msg": message, "type": "value_error"}],
+    )
 
 async def write_audit_log(
     db: AsyncSession,
@@ -244,8 +272,6 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-active_detection_service = None
-
 async def websocket_pubsub_listener(manager: ConnectionManager):
     import asyncio
     while True:
@@ -277,7 +303,7 @@ SYSTEM_STATS = {
     "last_successful_poll": None,
     "last_poll_attempt": None,
     "last_poll_records": 0,
-    "last_processed_records": 0,
+    "last_normalized_records": 0,
     "upstream_status": "UNKNOWN",
     "feed_mode": "UNKNOWN",
     "feed_source": "none",
@@ -285,7 +311,19 @@ SYSTEM_STATS = {
     "last_poll_http_status": None,
     "rate_limit_remaining": None,
     "total_real_states": 0,
-    "total_synthetic_states": 0
+    "total_synthetic_states": 0,
+    "source_status": "AWAITING_TELEMETRY",
+    "source_name": None,
+    "last_successful_update": None,
+    "next_attempt_at": None,
+    "retry_after": None,
+    "snapshot_age_seconds": None,
+    "snapshot_count": None,
+    "consecutive_failures": 0,
+    "last_error": None,
+    "refresh_in_progress": False,
+    "manual_refresh_pending": False,
+    "refresh_interval_seconds": None,
 }
 
 async def invalidate_snapshot_cache():
@@ -301,6 +339,7 @@ async def invalidate_snapshot_cache():
 @limiter.limit("50/minute")
 async def get_aircraft(
     request: Request,
+    response: Response,
     limit: Optional[int] = Query(default=None, ge=1, le=5000, description="Optional maximum aircraft to return. If omitted, returns all currently tracked aircraft without cutoff."),
     offset: int = Query(default=0, ge=0),
     max_age_seconds: Optional[float] = Query(default=None, ge=10.0, le=86400.0, description="Active tracking retention window in seconds."),
@@ -311,8 +350,67 @@ async def get_aircraft(
     Retrieve full snapshot of every aircraft currently tracked in aircraft_states
     within the active retention window (no artificial cutoff). Annotates staleness status.
     """
-    has_credentials = bool(settings.OPENSKY_USERNAME and settings.OPENSKY_PASSWORD)
-    poll_interval = float(settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if has_credentials else 900.0))
+    # A validated source snapshot is authoritative, including a valid empty
+    # snapshot. During source failures this remains unchanged and continues to
+    # be served with its original observation timestamps.
+    service = active_ingestion_service
+    snapshot = getattr(service, "last_valid_snapshot", None) if service else None
+    if snapshot is not None:
+        response.headers["X-AirGuard-Snapshot-Authoritative"] = "true"
+        poll_interval = float(settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if opensky_auth.configured else 900.0))
+        now = datetime.now(timezone.utc)
+        items = []
+        det_svc = active_detection_service
+        for record in snapshot:
+            observed_at = record.get("received_at")
+            if isinstance(observed_at, str):
+                try:
+                    observed_at = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            if not isinstance(observed_at, datetime):
+                continue
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            age = max(0.0, (now - observed_at).total_seconds())
+
+            score_data = det_svc.get_latest_score(record["icao24"]) if det_svc else None
+            comb_risk = score_data.get("combined_risk_score") if score_data else None
+            trust_val = score_data.get("trust_score") if score_data else derive_trust_score(comb_risk)
+            evidence_conf = score_data.get("evidence_confidence") if score_data else None
+            ass_status = score_data.get("assessment_status") if score_data else ("PARTIALLY_ASSESSED" if comb_risk is not None else "UNASSESSED")
+
+            items.append(AircraftStateResponse(
+                id=None,
+                icao24=record["icao24"],
+                callsign=record.get("callsign"),
+                squawk=record.get("squawk"),
+                latitude=record["latitude"],
+                longitude=record["longitude"],
+                altitude_m=record["altitude_m"],
+                velocity_ms=record["velocity_ms"],
+                heading_deg=record["heading_deg"],
+                vertical_rate_ms=record["vertical_rate_ms"],
+                on_ground=record["on_ground"],
+                received_at=observed_at,
+                source=record.get("source", service.source_adapter.name),
+                reported_nic=record.get("reported_nic"),
+                data_quality=record.get("data_quality") or {},
+                is_synthetic=False,
+                last_seen_seconds_ago=round(age, 1),
+                staleness_status="STALE" if age > max(20.0, poll_interval * 1.5) else "LIVE",
+                trust_score=trust_val,
+                combined_risk_score=comb_risk,
+                evidence_confidence=evidence_conf,
+                assessment_status=ass_status,
+            ))
+        if offset:
+            items = items[offset:]
+        if limit is not None:
+            items = items[:limit]
+        return items
+
+    poll_interval = float(settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if opensky_auth.configured else 900.0))
     max_age_seconds = max_age_seconds or min(86400.0, max(120.0, poll_interval * 3.0))
     cache_key = f"cache:aircraft:snapshot:{limit}:{offset}:{int(max_age_seconds)}"
     try:
@@ -338,7 +436,7 @@ async def get_aircraft(
         .subquery()
     )
     stmt = (
-        select(AircraftState, AircraftAssessment.combined_risk_score)
+        select(AircraftState, AircraftAssessment.combined_risk_score, AircraftAssessment.status, AircraftAssessment.signals)
         .join(subq, (AircraftState.icao24 == subq.c.icao24) & (AircraftState.received_at == subq.c.max_received))
         .outerjoin(AircraftAssessment, AircraftAssessment.aircraft_state_id == AircraftState.id)
         .order_by(AircraftState.received_at.desc())
@@ -354,7 +452,7 @@ async def get_aircraft(
     # Deduplicate in case multiple rows share exact same max_received for same icao24
     seen = set()
     response_items = []
-    for s, assessment_risk in states:
+    for s, assessment_risk, assessment_status, assessment_signals in states:
         if s.icao24 in seen:
             continue
         seen.add(s.icao24)
@@ -365,14 +463,19 @@ async def get_aircraft(
         is_stale = seconds_ago > max(20.0, poll_interval * 1.5)
         staleness_status = "STALE" if is_stale else "LIVE"
 
-        # Compute dynamic trust score based on kinematics and recent alert status
-        comb_risk = assessment_risk
-        trust_val = None  # Risk triage is not a validated aircraft trust rating.
+        comb_risk = round(assessment_risk, 4) if assessment_risk is not None else None
+        trust_val = derive_trust_score(comb_risk)
+        evidence_conf = None
+        if isinstance(assessment_signals, dict):
+            evidence_conf = assessment_signals.get("evidence_confidence")
+        if evidence_conf is None and comb_risk is not None:
+            evidence_conf = 0.40
 
         item = AircraftStateResponse(
             id=s.id,
             icao24=s.icao24,
             callsign=s.callsign,
+            squawk=s.squawk,
             latitude=s.latitude,
             longitude=s.longitude,
             altitude_m=s.altitude_m,
@@ -388,9 +491,12 @@ async def get_aircraft(
             last_seen_seconds_ago=round(seconds_ago, 1),
             staleness_status=staleness_status,
             trust_score=trust_val,
-            combined_risk_score=comb_risk
+            combined_risk_score=comb_risk,
+            evidence_confidence=evidence_conf,
+            assessment_status=assessment_status
         )
         response_items.append(item)
+
 
     try:
         serialized = [item.model_dump(mode="json") for item in response_items]
@@ -401,10 +507,36 @@ async def get_aircraft(
     return response_items
 
 
+@router.post(
+    "/system/refresh",
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        409: {"description": "A source refresh is already active or queued."},
+        429: {"description": "Refresh requests are rate limited."},
+        503: {"description": "The telemetry source manager is not initialized."},
+    },
+)
+@limiter.limit("6/minute")
+async def request_source_refresh(
+    request: Request,
+    current_user: User = Depends(require_viewer),
+):
+    """Queue one legitimate refresh through the configured source adapter."""
+    if active_ingestion_service is None:
+        raise HTTPException(status_code=503, detail="Telemetry source manager is not initialized; awaiting backend startup.")
+    result = await active_ingestion_service.request_manual_refresh()
+    if not result.get("accepted"):
+        raise HTTPException(status_code=409, detail=result.get("reason", "A refresh is already active."))
+    return result
+
+
 def ensure_utc_dt(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    try:
+        return dt.astimezone(timezone.utc)
+    except OverflowError as exc:
+        raise HTTPException(status_code=422, detail="Timestamp is outside the supported UTC range") from exc
 
 @router.get("/aircraft/history", response_model=List[AircraftStateResponse])
 @limiter.limit("60/minute")
@@ -432,7 +564,9 @@ async def get_all_aircraft_history(
     # Build query
     base_query = select(AircraftState).where(
         AircraftState.received_at >= start_utc,
-        AircraftState.received_at <= end_utc
+        AircraftState.received_at <= end_utc,
+        AircraftState.is_synthetic == False,
+        AircraftState.source != "regional_fallback",
     )
 
     if icao24:
@@ -520,8 +654,7 @@ async def get_aircraft_detail(
     now = datetime.now(timezone.utc)
     s_dt = ensure_utc_dt(latest_state.received_at)
     seconds_ago = max(0.0, (now - s_dt).total_seconds())
-    has_credentials = bool(settings.OPENSKY_USERNAME and settings.OPENSKY_PASSWORD)
-    poll_interval = float(settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if has_credentials else 900.0))
+    poll_interval = float(settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if opensky_auth.configured else 900.0))
     stale_after = max(20.0, poll_interval * 1.5)
     removal_after = max(120.0, poll_interval * 3.0)
     is_stale = seconds_ago > stale_after
@@ -534,19 +667,21 @@ async def get_aircraft_detail(
         from app.core.database import async_session_maker
         route_service_instance = FlightRouteService(async_session_maker)
     
-    route_data = await route_service_instance.get_or_fetch_route(
-        clean_icao,
-        callsign=latest_state.callsign,
-        db=db
+    # Route and identity lookups are user-triggered and run concurrently. The
+    # ingestion loop never fans these external requests out across the whole sky.
+    from app.ingestion.metadata_service import active_metadata_service
+    route_data, meta_data = await asyncio.gather(
+        route_service_instance.get_or_fetch_route(
+            clean_icao,
+            callsign=latest_state.callsign,
+            db=db
+        ),
+        active_metadata_service.get_aircraft_metadata(
+            clean_icao,
+            callsign=latest_state.callsign
+        )
     )
     route_resp = FlightRouteResponse(**route_data)
-
-    # 3. Aircraft Identity / Metadata (from active metadata service)
-    from app.ingestion.metadata_service import active_metadata_service
-    meta_data = await active_metadata_service.get_aircraft_metadata(
-        clean_icao,
-        callsign=latest_state.callsign
-    )
     identity_resp = AircraftIdentityResponse(**meta_data)
 
     # 4. Latest Trust Status & Risk Scoring
@@ -595,6 +730,12 @@ async def get_aircraft_detail(
     assessment_rules = assessment_signals.get("rule_flags", {}) if isinstance(assessment_signals, dict) else {}
     if isinstance(assessment_rules, dict):
         rule_flags.update({key: value for key, value in assessment_rules.items() if isinstance(value, bool)})
+    
+    evidence_conf = assessment_signals.get("evidence_confidence") if isinstance(assessment_signals, dict) else None
+    if evidence_conf is None and risk_score is not None:
+        evidence_conf = 0.40
+    unavailable_reasons = assessment_signals.get("unavailable_reasons", []) if isinstance(assessment_signals, dict) else []
+
     if latest_assessment is not None:
         technical_details.update({
             "rule_risk": 1.0 if any(value is True for value in assessment_rules.values()) else 0.0 if any(isinstance(value, bool) for value in assessment_rules.values()) else None,
@@ -603,18 +744,44 @@ async def get_aircraft_detail(
             "receiver_consistency_score": assessment_signals.get("receiver_consistency"),
         })
 
-    rolling_trust = max(5.0, min(100.0, 100.0 - (risk_score * 100.0))) if risk_score is not None else None
-    status_text = "Flagged — signal inconsistency detected" if is_flagged else "Insufficient evidence" if risk_score is None else "No active review flag"
+    assessment_status = latest_assessment.status if latest_assessment is not None else ("REVIEW_REQUIRED" if is_flagged else "INSUFFICIENT_EVIDENCE")
+    trust_val = derive_trust_score(risk_score)
+
+    if is_flagged:
+        status_text = "REVIEW_REQUIRED — Anomaly Flagged"
+        explanation = getattr(latest_alert, "reason_text", "Flagged — signal inconsistency detected.")
+    elif assessment_status == "ASSESSED":
+        status_text = "ASSESSED — Full Evidence Stack"
+        explanation = "All intended detector layers evaluated this observation. Telemetry Trust Index reflects verified consistency across physics rules, kinematics, and models."
+    elif assessment_status == "PARTIALLY_ASSESSED":
+        status_text = "PARTIALLY ASSESSED — Available Evidence"
+        explanation = "Detector assessed available telemetry signals (climb envelope, altitude-velocity coherence, kinematics). Telemetry Trust Index is derived from detector risk. This is not an airworthiness or flight safety rating."
+    elif assessment_status == "SUPPRESSED":
+        status_text = "SUPPRESSED — Known Entity"
+        explanation = "Assessment suppressed for verified transponder profile."
+    else:
+        status_text = "INSUFFICIENT EVIDENCE"
+        explanation = "Observation history is accumulating. Not enough scored evidence exists to compute a defensible detector risk or trust score."
 
     trust_resp = AircraftTrustDetailResponse(
         status_text=status_text,
         is_flagged=is_flagged,
         combined_risk_score=round(risk_score, 4) if risk_score is not None else None,
-        rolling_trust_score=round(rolling_trust, 1) if rolling_trust is not None else None,
+        trust_score=trust_val,
+        evidence_confidence=evidence_conf,
+        assessment_status=assessment_status,
+        smoothed_risk_score=None,
         explanation=explanation,
         reasons=reasons,
         rule_flags=rule_flags,
-        technical_details={**technical_details, "assessment_status": latest_assessment.status if latest_assessment is not None else "UNAVAILABLE", "evidence_confidence": latest_assessment.evidence_confidence if latest_assessment is not None else 0.0, "signals": assessment_signals},
+        technical_details={
+            **technical_details,
+            "assessment_status": assessment_status,
+            "rule_assessment_coverage": latest_assessment.rule_assessment_coverage if latest_assessment is not None else None,
+            "evidence_confidence": evidence_conf,
+            "signals": assessment_signals
+        },
+        unavailable_reasons=unavailable_reasons,
         trilateration_stations=None,
         last_evaluated_at=latest_state.received_at
     )
@@ -636,8 +803,13 @@ async def get_aircraft_detail(
         data_quality=getattr(latest_state, "data_quality", {}) or {},
         is_synthetic=bool(getattr(latest_state, "is_synthetic", False) or latest_state.source == "regional_fallback"),
         last_seen_seconds_ago=round(seconds_ago, 1),
-        staleness_status=tracking_status
+        staleness_status=tracking_status,
+        trust_score=trust_val,
+        combined_risk_score=round(risk_score, 4) if risk_score is not None else None,
+        evidence_confidence=evidence_conf,
+        assessment_status=assessment_status
     )
+
 
     staleness_resp = AircraftStalenessResponse(
         status=tracking_status,
@@ -703,7 +875,7 @@ async def get_aircraft_trust_history(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_viewer)
 ):
-    """Computes a rolling trust score (0-100) across the tracked session for an aircraft address."""
+    """Computes a weighted history of available heuristic detector risk scores."""
     clean_icao = icao24.lower().strip()
 
     # Query aircraft states along with any matched alerts ordered chronologically
@@ -733,15 +905,15 @@ async def get_aircraft_trust_history(
             "is_alert": alert_id is not None
         })
 
-    history_points = compute_weighted_rolling_trust(readings, window=window)
-    pattern = classify_trust_pattern(history_points) if len(history_points) >= 2 else "UNASSESSED"
+    history_points = compute_weighted_rolling_risk(readings, window=window)
+    pattern = classify_risk_pattern(history_points)
 
-    caption = "Only records with a persisted detector score are included. This history is not a safety or airworthiness rating."
-    current_trust = history_points[-1]["trust_score"] if history_points else None
+    caption = "Only observations with a persisted score are included. Scores are heuristic detector outputs, not probabilities or safety ratings."
+    current_risk = history_points[-1]["risk_score"] if history_points else None
 
     return AircraftTrustHistoryResponse(
         icao24=clean_icao,
-        current_trust_score=current_trust,
+        current_risk_score=current_risk,
         window_size=window,
         pattern=pattern,
         caption=caption,
@@ -753,15 +925,27 @@ async def get_aircraft_trust_history(
 @limiter.limit("30/minute")
 async def get_alerts(
     request: Request,
+    response: Response,
     acknowledged: Optional[bool] = Query(default=None),
     icao24: Optional[str] = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=1000, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_viewer)
 ):
     """Retrieve security anomaly alerts, filterable by acknowledged state and ICAO code."""
-    query = select(Alert)
+    total_count_result = await db.execute(
+        select(func.count(Alert.id)).where(Alert.is_synthetic.is_(False))
+    )
+    active_count_result = await db.execute(
+        select(func.count(Alert.id)).where(Alert.is_synthetic.is_(False), Alert.acknowledged.is_(False))
+    )
+    total_cnt = int(total_count_result.scalar_one() or 0)
+    active_cnt = int(active_count_result.scalar_one() or 0)
+    response.headers["X-Total-Count"] = str(total_cnt)
+    response.headers["X-Active-Alert-Count"] = str(active_cnt)
+    # The operational alert stream contains production observations only.
+    query = select(Alert).where(Alert.is_synthetic.is_(False))
     
     if acknowledged is not None:
         query = query.where(Alert.acknowledged == acknowledged)
@@ -772,6 +956,331 @@ async def get_alerts(
         query.order_by(Alert.detected_at.desc()).limit(limit).offset(offset)
     )
     return result.scalars().all()
+
+
+def _distance_km(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    """Great-circle separation used only to link nearby persisted alert observations."""
+    radians = math.radians
+    d_lat = radians(lat_b - lat_a)
+    d_lon = radians(lon_b - lon_a)
+    a = math.sin(d_lat / 2) ** 2 + math.cos(radians(lat_a)) * math.cos(radians(lat_b)) * math.sin(d_lon / 2) ** 2
+    return 6371.0088 * 2 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+
+
+async def _derive_airspace_event_candidates(db: AsyncSession, window_minutes: int, radius_km: float) -> List[Dict[str, Any]]:
+    """Group persisted real alerts by proximity/time; the grouping is not a causal verdict."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    result = await db.execute(
+        select(Alert, AircraftState)
+        .join(AircraftState, Alert.aircraft_state_id == AircraftState.id)
+        .where(Alert.is_synthetic.is_(False))
+        .where(AircraftState.is_synthetic.is_(False))
+        .where(AircraftState.source != "regional_fallback")
+        .where(AircraftState.received_at >= cutoff)
+        .order_by(AircraftState.received_at.desc())
+        .limit(1000)
+    )
+    observations = [
+        {"alert": alert, "state": state}
+        for alert, state in result.all()
+        if state.latitude is not None and state.longitude is not None
+    ]
+    count = len(observations)
+    parents = list(range(count))
+    linked_pair_counts = [0] * count
+    max_link_distances = [0.0] * count
+    observation_times = []
+    for observation in observations:
+        observed_at = observation["state"].received_at
+        observation_times.append(observed_at.replace(tzinfo=timezone.utc) if observed_at.tzinfo is None else observed_at)
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    max_seconds = window_minutes * 60
+    for left in range(count):
+        state_a = observations[left]["state"]
+        time_a = observation_times[left]
+        for right in range(left + 1, count):
+            time_b = observation_times[right]
+            elapsed_seconds = abs((time_a - time_b).total_seconds())
+            # Rows are ordered newest first, so older records cannot match once
+            # this pair exceeds the allowed observation-time separation.
+            if elapsed_seconds > max_seconds:
+                break
+            state_b = observations[right]["state"]
+            if state_a.icao24 == state_b.icao24:
+                continue
+            distance = _distance_km(state_a.latitude, state_a.longitude, state_b.latitude, state_b.longitude)
+            if distance <= radius_km:
+                root_a, root_b = find(left), find(right)
+                if root_a != root_b:
+                    parents[root_b] = root_a
+                    linked_pair_counts[root_a] += linked_pair_counts[root_b] + 1
+                    max_link_distances[root_a] = max(max_link_distances[root_a], max_link_distances[root_b], distance)
+                else:
+                    linked_pair_counts[root_a] += 1
+                    max_link_distances[root_a] = max(max_link_distances[root_a], distance)
+
+    components = {}
+    for index in range(count):
+        components.setdefault(find(index), []).append(index)
+
+    candidates = []
+    for indexes in components.values():
+        aircraft = sorted({observations[i]["state"].icao24 for i in indexes})
+        if len(aircraft) < 2:
+            continue
+        component_root = find(indexes[0])
+        alerts = [observations[i]["alert"] for i in indexes]
+        states = [observations[i]["state"] for i in indexes]
+        lat_sum = sum(math.sin(math.radians(state.latitude)) for state in states)
+        lat_cos = sum(math.cos(math.radians(state.latitude)) for state in states)
+        lon_sin = sum(math.sin(math.radians(state.longitude)) for state in states)
+        lon_cos = sum(math.cos(math.radians(state.longitude)) for state in states)
+        center_latitude = math.degrees(math.atan2(lat_sum, lat_cos))
+        center_longitude = math.degrees(math.atan2(lon_sin, lon_cos))
+        first_alert_id = min(alert.id for alert in alerts)
+        candidates.append({
+            "candidate_id": f"derived-{first_alert_id}",
+            "status": "REVIEW_REQUIRED",
+            "start_time": min(state.received_at for state in states),
+            "end_time": max(state.received_at for state in states),
+            "center_latitude": center_latitude,
+            "center_longitude": center_longitude,
+            "aircraft_icao24": aircraft,
+            "alert_ids": sorted({alert.id for alert in alerts}),
+            "anomaly_types": sorted({flag for alert in alerts for flag in (alert.rule_flags or [])}),
+            "linked_alert_pairs": linked_pair_counts[component_root],
+            "max_link_distance_km": round(max_link_distances[component_root], 2),
+            "time_window_minutes": window_minutes,
+            "radius_km": radius_km,
+            "evidence": [
+                {
+                    "alert_id": alert.id,
+                    "icao24": state.icao24,
+                    "callsign": state.callsign,
+                    "observed_at": state.received_at,
+                    "latitude": state.latitude,
+                    "longitude": state.longitude,
+                    "source": state.source,
+                    "data_quality": state.data_quality or {},
+                    "rule_flags": alert.rule_flags or [],
+                    "risk_score": alert.combined_risk_score,
+                    "reason_text": alert.reason_text,
+                }
+                for alert, state in ((observations[i]["alert"], observations[i]["state"]) for i in indexes)
+            ],
+        })
+    candidates.sort(key=lambda candidate: candidate["end_time"], reverse=True)
+    return candidates
+
+
+@router.get("/airspace/event-candidates", response_model=List[AirspaceEventCandidate])
+@limiter.limit("20/minute")
+async def get_airspace_event_candidates(
+    request: Request,
+    window_minutes: int = Query(default=30, ge=1, le=240),
+    radius_km: float = Query(default=50.0, ge=1.0, le=500.0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_viewer)
+):
+    """Return derived candidate groups and their source alert/observation evidence."""
+    return await _derive_airspace_event_candidates(db, window_minutes, radius_km)
+
+
+@router.get("/airspace/event-cases", response_model=List[AirspaceEventCaseResponse])
+@limiter.limit("30/minute")
+async def list_airspace_event_cases(
+    request: Request,
+    status_filter: Optional[str] = Query(default=None, alias="status", pattern="^(OPEN|IN_REVIEW|CLOSED)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_viewer)
+):
+    query = select(AirspaceEventCase).options(selectinload(AirspaceEventCase.reviews))
+    if status_filter:
+        query = query.where(AirspaceEventCase.status == status_filter)
+    result = await db.execute(query.order_by(AirspaceEventCase.updated_at.desc()).limit(limit))
+    return result.scalars().all()
+
+
+@router.get("/airspace/event-cases/{case_id}", response_model=AirspaceEventCaseResponse)
+@limiter.limit("60/minute")
+async def get_airspace_event_case(
+    request: Request,
+    case_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_viewer)
+):
+    result = await db.execute(
+        select(AirspaceEventCase)
+        .options(selectinload(AirspaceEventCase.reviews))
+        .where(AirspaceEventCase.id == case_id)
+    )
+    event_case = result.scalar_one_or_none()
+    if event_case is None:
+        raise HTTPException(status_code=404, detail="Airspace event case not found")
+    return event_case
+
+
+@router.post("/airspace/event-cases", response_model=AirspaceEventCaseResponse, status_code=201)
+@limiter.limit("10/minute")
+async def create_airspace_event_case(
+    request: Request,
+    payload: AirspaceEventCaseCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_analyst)
+):
+    alert_ids = sorted(set(payload.alert_ids))
+    if len(alert_ids) != len(payload.alert_ids):
+        raise _invalid_body("alert_ids", "Alert IDs must be unique")
+    if len(payload.title.strip()) < 3:
+        raise _invalid_body("title", "Case title must contain at least 3 non-space characters")
+
+    # Recompute the candidate from the source database rows. The client cannot
+    # create a case by submitting fabricated coordinates or an arbitrary group.
+    candidates = await _derive_airspace_event_candidates(db, payload.time_window_minutes, payload.radius_km)
+    candidate = next((item for item in candidates if item["candidate_id"] == payload.candidate_id), None)
+    if candidate is None or candidate["alert_ids"] != alert_ids:
+        raise HTTPException(status_code=409, detail="This candidate has changed or is no longer supported by current real alert observations. Refresh candidates and try again.")
+
+    existing_result = await db.execute(
+        select(AirspaceEventCase.id).where(
+            AirspaceEventCase.candidate_id == payload.candidate_id,
+            AirspaceEventCase.status != "CLOSED",
+        ).limit(1)
+    )
+    if existing_result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="An open case already exists for this candidate")
+
+    now = datetime.now(timezone.utc)
+    event_case = AirspaceEventCase(
+        candidate_id=payload.candidate_id,
+        title=payload.title.strip(),
+        status="OPEN",
+        disposition=None,
+        evidence_snapshot=jsonable_encoder({
+            **candidate,
+            "captured_at": now,
+            "correlation_method": "space-time-connected-components-v1",
+            "causal_finding": None,
+        }),
+        created_by=current_user.id,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(event_case)
+    await db.flush()
+    db.add(AirspaceEventCaseReview(
+        case_id=event_case.id,
+        reviewer_id=current_user.id,
+        action="CREATED",
+        previous_status=None,
+        new_status="OPEN",
+        previous_disposition=None,
+        new_disposition=None,
+        notes="Case created from a server-revalidated alert candidate.",
+        ip_address=request.client.host if request.client else None,
+        created_at=now,
+    ))
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="create",
+        target_type="airspace_event_case",
+        target_id=str(event_case.id),
+        ip_address=request.client.host if request.client else None,
+        timestamp=now,
+    ))
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="An open case already exists for this candidate") from exc
+    result = await db.execute(
+        select(AirspaceEventCase)
+        .options(selectinload(AirspaceEventCase.reviews))
+        .where(AirspaceEventCase.id == event_case.id)
+    )
+    return result.scalar_one()
+
+
+@router.patch("/airspace/event-cases/{case_id}", response_model=AirspaceEventCaseResponse)
+@limiter.limit("20/minute")
+async def update_airspace_event_case(
+    request: Request,
+    case_id: int,
+    payload: AirspaceEventCaseUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_analyst)
+):
+    result = await db.execute(
+        select(AirspaceEventCase)
+        .options(selectinload(AirspaceEventCase.reviews))
+        .where(AirspaceEventCase.id == case_id)
+        .with_for_update()
+    )
+    event_case = result.scalar_one_or_none()
+    if event_case is None:
+        raise HTTPException(status_code=404, detail="Airspace event case not found")
+
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise _invalid_body("body", "Provide a status, disposition, or review note")
+    if "status" in changes and changes["status"] is None:
+        raise _invalid_body("status", "Status cannot be null")
+    previous_status = event_case.status
+    previous_disposition = event_case.disposition
+    new_status = changes.get("status", previous_status)
+    new_disposition = changes.get("disposition", previous_disposition)
+    if new_status != "CLOSED" and previous_status == "CLOSED" and "status" in changes and "disposition" not in changes:
+        new_disposition = None
+    if new_status != "CLOSED" and new_disposition is not None:
+        raise _invalid_body("disposition", "A disposition can only be set when closing the case")
+    notes = changes.get("notes")
+    if new_status == "CLOSED" and (not isinstance(notes, str) or len(notes.strip()) < 8):
+        raise _invalid_body("notes", "Closing a case requires a disposition note of at least 8 characters")
+    if new_status == "CLOSED" and new_disposition is None:
+        raise _invalid_body("disposition", "Choose a disposition before closing the case")
+    if new_status == previous_status and new_disposition == previous_disposition and not (isinstance(notes, str) and notes.strip()):
+        raise HTTPException(status_code=409, detail="No case changes were supplied")
+
+    now = datetime.now(timezone.utc)
+    event_case.status = new_status
+    event_case.disposition = new_disposition
+    event_case.updated_at = now
+    event_case.closed_at = now if new_status == "CLOSED" else None
+    action = "DISPOSITION_RECORDED" if new_status == "CLOSED" else "CASE_REOPENED" if previous_status == "CLOSED" else "CASE_UPDATED"
+    db.add(AirspaceEventCaseReview(
+        case_id=event_case.id,
+        reviewer_id=current_user.id,
+        action=action,
+        previous_status=previous_status,
+        new_status=new_status,
+        previous_disposition=previous_disposition,
+        new_disposition=new_disposition,
+        notes=notes.strip() if isinstance(notes, str) and notes.strip() else None,
+        ip_address=request.client.host if request.client else None,
+        created_at=now,
+    ))
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action=action.lower(),
+        target_type="airspace_event_case",
+        target_id=str(event_case.id),
+        ip_address=request.client.host if request.client else None,
+        timestamp=now,
+    ))
+    await db.commit()
+    result = await db.execute(
+        select(AirspaceEventCase)
+        .options(selectinload(AirspaceEventCase.reviews))
+        .where(AirspaceEventCase.id == case_id)
+    )
+    return result.scalar_one()
 
 
 @router.post("/alerts/{id}/acknowledge", response_model=AlertResponse)
@@ -865,6 +1374,21 @@ async def get_system_health(
         except Exception:
             return default
 
+    database_status = "UNKNOWN"
+    redis_status = "UNKNOWN"
+    try:
+        await db.execute(text("SELECT 1"))
+        database_status = "CONNECTED"
+    except SQLAlchemyError as exc:
+        database_status = "DISCONNECTED"
+        logger.warning("System health database probe failed: %s", exc)
+    try:
+        await redis_client.ping()
+        redis_status = "CONNECTED"
+    except RedisError as exc:
+        redis_status = "DISCONNECTED"
+        logger.warning("System health Redis probe failed: %s", exc)
+
     try:
         import time
         now_ts = time.time()
@@ -882,12 +1406,12 @@ async def get_system_health(
             SYSTEM_STATS["total_real_states"] = real_count
             SYSTEM_STATS["total_synthetic_states"] = synth_count
             SYSTEM_STATS["_last_count_refresh"] = now_ts
-    except Exception:
-        pass
+    except SQLAlchemyError as exc:
+        database_status = "DISCONNECTED"
+        logger.warning("System health aircraft counts unavailable: %s", exc)
 
     # --- Live Data Continuity Verification ---
-    has_credentials = bool(settings.OPENSKY_USERNAME and settings.OPENSKY_PASSWORD)
-    poll_interval = float(settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if has_credentials else 900.0))
+    poll_interval = float(settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if opensky_auth.configured else 900.0))
     max_allowed_gap = 2.0 * poll_interval
     now_utc = datetime.now(timezone.utc)
     last_poll = SYSTEM_STATS.get("last_successful_poll")
@@ -903,6 +1427,21 @@ async def get_system_health(
 
     upstream_status = str(SYSTEM_STATS.get("upstream_status", "UNKNOWN"))
     feed_mode = str(SYSTEM_STATS.get("feed_mode", "UNKNOWN"))
+    last_successful_update = SYSTEM_STATS.get("last_successful_update") or last_poll
+    if isinstance(last_successful_update, str):
+        try:
+            last_successful_update = datetime.fromisoformat(last_successful_update.replace("Z", "+00:00"))
+        except ValueError:
+            last_successful_update = None
+    if last_successful_update and last_successful_update.tzinfo is None:
+        last_successful_update = last_successful_update.replace(tzinfo=timezone.utc)
+    snapshot_age_seconds = (
+        max(0.0, (now_utc - last_successful_update).total_seconds())
+        if last_successful_update else None
+    )
+    source_status = str(SYSTEM_STATS.get("source_status", "AWAITING_TELEMETRY"))
+    if source_status == "FRESH" and snapshot_age_seconds is not None and snapshot_age_seconds > max_allowed_gap:
+        source_status = "STALE"
     if gap_detected and upstream_status == "LIVE":
         upstream_status = "STALE"
     if gap_detected:
@@ -916,6 +1455,9 @@ async def get_system_health(
     elif upstream_status == "RATE_LIMITED":
         live_continuity_status = "RATE_LIMITED"
         continuity_msg = "The aircraft feed is rate-limited. No aircraft are shown until live reports resume."
+    elif upstream_status == "UNAVAILABLE" and SYSTEM_STATS.get("last_poll_http_status") in {401, 403}:
+        live_continuity_status = "AUTHENTICATION_FAILED"
+        continuity_msg = "OpenSky rejected authentication. Check the configured OAuth2 client ID and secret; no substitute aircraft data is used."
     elif upstream_status == "UNAVAILABLE":
         live_continuity_status = "UPSTREAM_UNAVAILABLE"
         continuity_msg = "The configured aircraft feed is unavailable. Check its connection and credentials."
@@ -929,24 +1471,28 @@ async def get_system_health(
     if upstream_status == "RATE_LIMITED":
         upstream_message = "The configured global feed returned HTTP 429. No aircraft are shown until access resumes."
     elif upstream_status == "LIVE" and _to_int(SYSTEM_STATS.get("last_poll_records", 0)) == 0:
-        upstream_message = "The global feed is responding with no aircraft reports at this moment."
+        upstream_message = "The global feed is responding with no aircraft reports at this moment. Anonymous provider access is quota-limited." if not opensky_auth.configured else "The authenticated global feed is responding with no aircraft reports at this moment."
     elif upstream_status == "LIVE":
-        upstream_message = "Aircraft reports are arriving from the configured live feed."
+        upstream_message = "Aircraft reports are arriving from the authenticated global feed." if opensky_auth.configured else "Aircraft reports are arriving through anonymous global access; provider quotas limit refresh frequency. Configure OAuth2 credentials for the authenticated quota."
     elif upstream_status == "UNKNOWN":
-        upstream_message = "Waiting for the first response from the configured aircraft feed."
+        upstream_message = "Waiting for the first response from the configured aircraft feed. Anonymous access is quota-limited." if not opensky_auth.configured else "Waiting for the first response from the authenticated aircraft feed."
     elif upstream_status == "STALE":
         upstream_message = "The last successful global feed response is stale. Aircraft positions may be outdated."
+    elif upstream_status == "UNAVAILABLE" and SYSTEM_STATS.get("last_poll_http_status") in {401, 403}:
+        upstream_message = "OpenSky rejected authentication (HTTP 401/403). Configure a valid OAuth2 API client; no generated aircraft are shown."
     else:
         upstream_message = "The configured global aircraft feed is unavailable. No fallback tracks are generated."
 
     response_payload = SystemHealthResponse(
+        database_status=database_status,
+        redis_status=redis_status,
         poll_latency_ms=_to_float(SYSTEM_STATS.get("poll_latency_ms", 0.0)),
         queue_depth=_to_int(SYSTEM_STATS.get("queue_depth", 0)),
         circuit_breaker_state=str(SYSTEM_STATS.get("circuit_breaker_state", "CLOSED")),
         last_successful_poll=last_poll,
         last_poll_attempt=SYSTEM_STATS.get("last_poll_attempt"),
         last_poll_records=_to_int(SYSTEM_STATS.get("last_poll_records", 0)),
-        last_processed_records=_to_int(SYSTEM_STATS.get("last_processed_records", 0)),
+        last_normalized_records=_to_int(SYSTEM_STATS.get("last_normalized_records", 0)),
         upstream_status=upstream_status,
         feed_mode=feed_mode,
         feed_source=str(SYSTEM_STATS.get("feed_source", "none")),
@@ -960,7 +1506,19 @@ async def get_system_health(
         seconds_since_last_poll=round(seconds_since_poll, 2),
         max_allowed_poll_gap_seconds=max_allowed_gap,
         continuity_gap_detected=gap_detected,
-        continuity_message=continuity_msg
+        continuity_message=continuity_msg,
+        source_status=source_status,
+        source_name=SYSTEM_STATS.get("source_name"),
+        last_successful_update=last_successful_update,
+        next_attempt_at=SYSTEM_STATS.get("next_attempt_at"),
+        retry_after=SYSTEM_STATS.get("retry_after"),
+        snapshot_age_seconds=round(snapshot_age_seconds, 2) if snapshot_age_seconds is not None else None,
+        snapshot_count=SYSTEM_STATS.get("snapshot_count"),
+        consecutive_failures=_to_int(SYSTEM_STATS.get("consecutive_failures", 0)),
+        last_error=SYSTEM_STATS.get("last_error"),
+        refresh_in_progress=bool(SYSTEM_STATS.get("refresh_in_progress", False)),
+        manual_refresh_pending=bool(SYSTEM_STATS.get("manual_refresh_pending", False)),
+        refresh_interval_seconds=_to_float(SYSTEM_STATS.get("refresh_interval_seconds"), poll_interval),
     )
 
     if (gap_detected or upstream_status in {"RATE_LIMITED", "UNAVAILABLE"}) and strict:
@@ -997,7 +1555,11 @@ async def websocket_endpoint(
         manager.disconnect(websocket)
 
 
-@router.get("/reports/session")
+@router.get(
+    "/reports/session",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}}}},
+)
 @limiter.limit("5/minute")
 async def generate_session_report(
     request: Request,
@@ -1195,14 +1757,6 @@ async def generate_session_report(
 
 
 from app.core.rule_config import active_rule_config
-from app.detection.rules import (
-    check_impossible_climb_rate,
-    check_altitude_velocity_mismatch,
-    check_position_jump,
-    check_duplicate_icao,
-    check_low_signal_confidence
-)
-
 class ConfigUpdatePayload(BaseModel):
     max_implied_speed_kmh: float
     duplicate_icao_dist_km: float
@@ -1266,110 +1820,8 @@ async def replay_session_validation(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_analyst)
 ):
-    """Replay historical sessions against the active config, computing updated precision/recall."""
-    # 1. Fetch historical states and alerts
-    states_result = await db.execute(
-        select(AircraftState).order_by(AircraftState.icao24, AircraftState.received_at.asc())
+    """Report unavailable until genuine labeled validation data is configured."""
+    raise HTTPException(
+        status_code=409,
+        detail="Precision and recall are unavailable: AirGuard has no independently labeled validation dataset. Live telemetry and synthetic examples are not ground truth."
     )
-    all_states = states_result.scalars().all()
-
-    alerts_result = await db.execute(
-        select(Alert)
-    )
-    all_alerts = alerts_result.scalars().all()
-
-    # Map state_id to whether it was a ground truth synthetic anomaly
-    synthetic_state_ids = {a.aircraft_state_id for a in all_alerts if a.is_synthetic}
-
-    TP, FP, TN, FN = 0, 0, 0, 0
-
-    # We evaluate sequentially grouped by ICAO to handle history-based checks (jump, duplicate)
-    icao_histories = {}
-
-    for state in all_states:
-        icao = state.icao24
-        history = icao_histories.get(icao, [])
-
-        # Evaluate rules
-        rule_climb, _, _ = check_impossible_climb_rate(
-            state.vertical_rate_ms, active_rule_config
-        )
-        rule_alt_vel, _, _ = check_altitude_velocity_mismatch(
-            state.altitude_m, state.velocity_ms, state.on_ground, active_rule_config
-        )
-
-        rule_jump = False
-        rule_dup = False
-        rule_low_signal = False
-        if len(history) > 0:
-            prev = history[-1]
-            rule_jump, _, _ = check_position_jump(
-                current_lat=state.latitude, current_lon=state.longitude, current_time=state.received_at,
-                prev_lat=prev.latitude, prev_lon=prev.longitude, prev_time=prev.received_at,
-                config=active_rule_config
-            )
-            rule_dup, _, _ = check_duplicate_icao(
-                lat_a=state.latitude, lon_a=state.longitude, time_a=state.received_at,
-                lat_b=prev.latitude, lon_b=prev.longitude, time_b=prev.received_at,
-                config=active_rule_config
-            )
-            rule_low_signal, _, _ = check_low_signal_confidence(
-                reported_nic=state.reported_nic,
-                current_lat=state.latitude, current_lon=state.longitude,
-                prev_lat=prev.latitude, prev_lon=prev.longitude,
-                config=active_rule_config
-            )
-
-        predicted_anomaly = rule_climb or rule_alt_vel or rule_jump or rule_dup or rule_low_signal
-        ground_truth_anomaly = state.id in synthetic_state_ids
-
-        if ground_truth_anomaly and predicted_anomaly:
-            TP += 1
-        elif not ground_truth_anomaly and predicted_anomaly:
-            FP += 1
-        elif ground_truth_anomaly and not predicted_anomaly:
-            FN += 1
-        else:
-            TN += 1
-
-        history.append(state)
-        icao_histories[icao] = history
-
-    # Calculate metrics
-    precision = TP / (TP + FP) if (TP + FP) > 0 else 1.0
-    recall = TP / (TP + FN) if (TP + FN) > 0 else 1.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 1.0
-
-    # 2. Write new ModelRun row
-    db_run = ModelRun(
-        run_at=datetime.now(timezone.utc),
-        model_version="Replay-Config",
-        true_positives=TP,
-        false_positives=FP,
-        true_negatives=TN,
-        false_negatives=FN,
-        precision=precision,
-        recall=recall,
-        f1=f1,
-        notes=f"Replay thresholds: climb={active_rule_config.max_vertical_rate_ms}m/s, speed={active_rule_config.max_implied_speed_kmh}km/h"
-    )
-    db.add(db_run)
-    await db.commit()
-    await db.refresh(db_run)
-
-    try:
-        keys = await redis_client.keys("cache:model_runs:all:*")
-        if keys:
-            await redis_client.delete(*keys)
-    except Exception as e:
-        logger.error(f"Failed to invalidate model_runs cache: {e}")
-
-    await write_audit_log(
-        db=db,
-        user_id=current_user.id,
-        action="replay",
-        target_type="replay",
-        target_id=str(db_run.id),
-        ip_address=request.client.host if request.client else None
-    )
-    return db_run

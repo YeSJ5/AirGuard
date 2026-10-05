@@ -1,99 +1,50 @@
-# Historical Model Card Draft — Reproduction Required
+# AirGuard detector and evidence card
 
-> **Status: not an operational model card.** Benchmark numbers and generalization statements below are legacy claims that have not been reproduced in this review. Do not present them as validated real-world performance. Current product scope and the required validation work are described in [PRODUCT_VISION.md](PRODUCT_VISION.md).
+**Scope reviewed:** repository source on 2026-10-03. Backend runtime, database migration, and live feed behavior were not available for end-to-end verification. This card describes the source implementation, not aviation safety or operational surveillance performance.
 
-## Model Details
-- **Developed by**: AirGuard Security Team
-- **Model Date**: August 2026
-- **Model Type**: Hybrid Trust Scoring Pipeline:
-  1. **Supervised Soft-Voting Ensemble**: Scikit-Learn RandomForest + Gradient Boosting Classifiers.
-  2. **Unsupervised Deep Autoencoder**: PyTorch Multi-layer Feedforward neural network.
-- **Primary Objective (intended)**: Flag unusual ADS-B state vectors for review using physical rules, feature analysis and available model outputs. Outputs are not calibrated probabilities or aircraft safety ratings.
+## Purpose and limits
 
-## Intended Use
-- **Primary Use Case**: Live ground-station monitoring to detect transponder anomalies such as:
-  - **GPS Spoofing / Meaconing**: Aircraft reporting false positions that deviate from physical flight dynamics.
-  - **Ghost Aircraft Injections**: Insertion of synthetic transponder signals by RF transmitters on the ground.
-- **Intended Users**: Aviation safety researchers, amateur ground station operators, airport security teams.
-- **Out of Scope**: Safety-critical air traffic collision avoidance (e.g., TCAS replacement).
+AirGuard stores aircraft observations returned by its configured OpenSky global state query and evaluates a small set of telemetry consistency rules. It attaches available evidence to an aircraft observation so an analyst can inspect it. It is not a safety service, airworthiness judgment, spoofing verdict, or substitute for validated surveillance systems.
 
-## Training Data & Synthetic Methodology
-Due to the rarity of actual transponder spoofing and RF injection attacks in civil aviation, there is insufficient real-world threat telemetry. To train supervised models, we generate a synthetic training set:
-- **Baseline Normal Class (1,000 samples)**: Simulated normal flight dynamics using historical OpenSky parameters (low speed/heading variances, standard 8s intervals, no rule triggers).
-- **Injected Anomaly Class (1,000 samples)**: Programmatic threat injections covering:
-  - **Position Jumps**: Implied speed anomalies exceeding 1200 km/h with high speed/heading variances.
-  - **Duplicate ICAO**: Simultaneous reports from different locations within the same second.
-  - **Climb Rate Anomalies**: Altitude vertical speed exceeding ±50 m/s.
-  - **Altitude/Velocity Mismatches**: Inconsistent attributes (e.g. flying speed while reported taxiing on the ground, or stationary in the air at 0m altitude).
-  - **Low Signal Confidence + Displacement**: Self-reported Navigation Integrity Category degradation (NIC < 7) coupled with significant position jumps (> 10 km).
+The feed is not a complete census. Visibility depends on receiver coverage, aircraft transmissions, provider availability, credentials, and API quota. AirGuard does not generate replacement aircraft when the provider is unavailable. See [the live-feed guide](LIVE_FEED_GUIDE.md).
 
-### Real-World Precedent: GPSJam.org & Self-Reported Navigation Integrity
-Unlike purely derived kinematic checks (implied speed or climb rate), ADS-B transponders compliant with RTCA DO-260B honestly broadcast their onboard avionics' GPS integrity:
-- **Navigation Integrity Category (NIC, 0–11)**: Encodes the containment radius \(R_c\). Controlled civil airspace mandates \(\text{NIC} \ge 7\) (\(R_c < 0.2\text{ NM}\) / ~370 m).
-- **Navigation Accuracy Category for Position (NACp, 0–11)**: Encodes estimated 95% horizontal position uncertainty.
+## Data and provenance
 
-When an aircraft encounters electronic warfare, GPS jamming, or spoofing (meaconing), the onboard GNSS receiver loses satellite carrier-to-noise ratio or triggers Receiver Autonomous Integrity Monitoring (RAIM) faults, immediately degrading the broadcast NIC and NACp values. **[GPSJam.org](https://gpsjam.org)** uses this exact underlying telemetry from global ADS-B receiver networks to generate authoritative daily maps of GNSS interference zones (e.g., Eastern Europe, Middle East, Baltic Sea). 
+- Live input is OpenSky `/api/states/all` as normalized by `backend/app/ingestion/service.py`.
+- The standard state vector contains fields 0–17. It includes receiver identifiers but no NIC/NACp field; AirGuard does not infer receiver locations from those IDs. See the [official state-vector field list](https://openskynetwork.github.io/opensky-api/rest.html#all-state-vectors).
+- The normalizer rejects missing or out-of-range coordinates. It preserves which kinematic fields were actually present and records a timestamp source.
+- Missing numeric values are persisted as compatibility zeros only alongside `data_quality.observed_fields` / `missing_fields`. Consumers must gate calculations on these fields.
+- An optional NIC rule exists in source, but standard OpenSky vectors do not supply its input. It is therefore unassessed for the configured live feed.
+- Receiver-based consistency and multilateration return unavailable. There is no calibrated, time-synchronized station observation network configured.
 
-Citing GPSJam.org provides empirical real-world validation that self-reported transponder integrity degradation is an internationally proven signal for detecting electronic interference. AirGuard incorporates this via the `reported_nic` column and the `low_signal_confidence` rule: by requiring both low confidence (\(\text{NIC} < 7\)) and significant spatial displacement (\(> 10\text{ km}\)), the system avoids false alarms from benign transient drops (such as steep banking antenna masking) while decisively catching active spoofing telemetry.
+## Implemented live assessment
 
-### Limitations for Real-world Generalization
-- **Feature Simplicity**: The synthetic data uses clean, mathematical noise distributions (normal, exponential) that do not model microsecond arrival jitter, multipath reflections, or antenna polarization.
-- **Overfitting to Explicit Rules**: Because the model relies on binary rule flags as inputs alongside rolling variance features, it may struggle with "stealthy" spoofing attacks that stay just below rule thresholds (e.g. slow drifts).
-- **Receiver Noise Sensitivity**: Real-world packet loss and timing sync errors between stations can mimic "duplicate ICAO" or "position jumps", causing elevated False Positive Rates (FPR) not observed in synthetic testing.
+The deterministic rules cover position discontinuity, duplicate ICAO observations, climb-rate bounds, ground/air kinematic mismatch, and optional low-NIC plus displacement. A rule is `true`, `false`, or `null` when its input cannot be assessed. An unavailable input must not be interpreted as a pass.
 
-## Model Implementations
+`combine_scores` fuses rule outputs and optional model/receiver outputs only when present. The resulting 0–1 value is a heuristic detector risk index. It is neither calibrated probability nor trust. A score alone is not proof of spoofing or unsafe operation. The current live ML setting defaults off; the standard feed also leaves NIC and receiver geometry unavailable. In normal live configuration, risk is therefore driven by assessable deterministic rules.
 
-### 1. Trust Scoring Ensemble
-- **Classifier**: Combines RandomForestClassifier (weights=0.6) and GradientBoostingClassifier (weights=0.4).
-- **Input Dimensions**: 9 features:
-  1. `speed_variance` (rolling 5-state window)
-  2. `heading_variance` (rolling 5-state window)
-  3. `altitude_rate_variance` (rolling 5-state window)
-  4. `time_since_last_update` (seconds delta)
-  5. `rule_position_jump` (binary)
-  6. `rule_duplicate_icao` (binary)
-  7. `rule_climb_rate` (binary)
-  8. `rule_alt_vel_mismatch` (binary)
-  9. `rule_low_signal_confidence` (binary, NIC < 7 + spatial jump > 10 km)
-- **Metrics Comparison in `model_runs`**:
-  - **v0.1.0 Baseline (8 features)**:
-    - **Precision**: 0.985
-    - **Recall**: 0.962
-    - **F1-Score**: 0.973
-  - **v0.2.0 Run (9 features, including `rule_low_signal_confidence`)**:
-    - **Precision**: 1.0000 (0 false positives on 400 test samples)
-    - **Recall**: 1.0000 (0 false negatives on 400 test samples)
-    - **F1-Score**: 1.0000
-    - **Outcome**: The addition of `rule_low_signal_confidence` eliminated ambiguous edge-case misclassifications where low-variance spoofed positions might have previously evaded kinematic thresholds, achieving perfect separation on the synthetic test benchmark.
-- **Explainability**: Initialized via SHAP `TreeExplainer` on the RandomForest sub-estimator (`ensemble.named_estimators_['rf']`) to extract feature importance vectors and assign top explanations in plain English.
+`AircraftAssessment.rule_assessment_coverage` is the fraction of the five implemented rule inputs that were assessable for that observation. It is a coverage count, not evidence confidence, data truth, or detector correctness. Risk and rule coverage must remain separate in UI and downstream analysis.
 
-### 2. Deep Unsupervised Autoencoder
-- **Architecture**: PyTorch model with layout:
-  - Input (size 5) -> Linear (32) -> ReLU -> Linear (16) -> ReLU -> Bottleneck (8) -> Linear (16) -> ReLU -> Linear (32) -> ReLU -> Output (size 5).
-- **Detection Criteria**: Computes mean squared reconstruction error (MSE). Telemetry is marked anomalous if MSE exceeds the threshold value of `0.05`.
+Assessments store the rule flags, available model/receiver values, data-quality metadata, live-ML setting, detector version, and assessment timestamp. Alert evidence stores the rule-specific evidence and available scores. State, assessment, and a triggered alert are written in one database transaction.
 
-### 3. Combined Risk Score
-- Combined risk scores are aggregated as a weighted mean of the rule triggers, supervised ensemble probability, and autoencoder reconstruction errors:
-  \[
-  \text{Score} = 0.5 \times \text{Rules} + 0.3 \times \text{Ensemble} + 0.2 \times \text{Autoencoder}
-  \]
-- If the Combined Risk Score crosses `0.7`, a security alert is logged.
+## Optional research models
 
-### 4. Multi-Layer Architectural Ablation Study
+The repository includes a Random Forest / Gradient Boosting ensemble and a PyTorch autoencoder with model artifacts. They are disabled for live decisions by default (`ENABLE_LIVE_ML=false`); code presence or artifact presence does not establish model validity. The autoencoder source uses a 4→8→3→8→4 network. Model outputs must remain unavailable unless the setting is enabled, weights load, inputs are assessable, and the output is recorded with provenance.
 
-To empirically validate the defense-in-depth architecture rather than simply claiming ensemble benefits, we conducted a systematic ablation study using `backend/scripts/run_ablation_study.py`. The benchmark evaluated a held-out evaluation set of 400 telemetry vectors (199 benign flights with turbulence/maneuvering noise, and 201 anomalous vectors containing spoofing, jumps, duplicate ICAOs, and confidence drops) across four isolated configurations:
+Training and ablation scripts generate synthetic examples. Those examples can support software-path exploration only. They are not representative live-aircraft validation data. No real-world precision, recall, false-positive rate, calibration, generalization, or spoofing-detection performance is claimed here. Historical benchmark numbers were removed because they were not reproducible from the current live implementation and must not be used as evidence.
 
-| Configuration | Precision | Recall | F1-Score | False-Positive Rate (FPR) | TP | FP | TN | FN |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1. Rules-Only** | 1.0000 | 1.0000 | 1.0000 | 0.0000 (0.0%) | 201 | 0 | 199 | 0 |
-| **2. Ensemble-Only** (RF + GBDT, continuous features only) | 0.9526 | 1.0000 | 0.9757 | 0.0503 (5.03%) | 201 | 10 | 189 | 0 |
-| **3. Autoencoder-Only** (Unsupervised PyTorch MSE) | 0.4882 | 0.9254 | 0.6392 | 0.9799 (97.99%) | 186 | 195 | 4 | 15 |
-| **4. Full Combined Pipeline** (Rules + Ensemble + Autoencoder) | **1.0000** | **1.0000** | **1.0000** | **0.0000 (0.0%)** | **201** | **0** | **199** | **0** |
+## Analyst interpretation
 
-#### Quantitative Findings & Analysis
-The full combined pipeline reduced false positives by 100% relative to the best single-layer machine learning configuration (completely eliminating all 10 false alarms observed in the standalone ensemble model, driving FPR down from 5.03% to 0.00%) while preserving 100% attack recall on the held-out evaluation set.
+- `INSUFFICIENT_EVIDENCE` is a valid result. Do not convert missing fields or unavailable layers to zero-risk or high-trust conclusions.
+- A rule flag is a lead to review. It does not establish cause or intent.
+- Multiple nearby flagged aircraft form a provisional space-time candidate only. Proximity does not show common cause.
+- Event case dispositions are analyst judgments over an immutable captured evidence snapshot; they do not automatically retrain or alter detector logic.
 
-While the supervised ensemble achieves high recall on its own, relying on variance features alone causes it to occasionally confuse sharp, lawful turns or turbulent gusts with trajectory tampering (10 false positives). Conversely, unsupervised autoencoders on raw variance features trigger frequent false alarms (97.99% FPR) because high variance does not inherently imply hostility. Meanwhile, deterministic rules, though exhibiting zero false positives on explicit physical boundary breaches, lack probabilistic nuance or sensitivity to subtle sub-threshold drifts.
+## Validation still required
 
-By integrating physics-based deterministic barriers with the supervised gradient-boosted ensemble and autoencoder reconstruction scoring into a unified risk metric, the combined architecture eliminates alert fatigue without compromising detection sensitivity. Each ablation run is immutably recorded in the PostgreSQL `model_runs` audit ledger (`abl-rules`, `abl-ensemble`, `abl-ae`, `abl-combined`) and visualized live within the frontend Analytics console.
-
+1. Reproduce migrations and live API behavior on PostgreSQL and Redis.
+2. Measure per-field availability, source freshness, feed gaps, and worker persistence under normal operation and service failure.
+3. Version rule definitions and thresholds in each assessment.
+4. Evaluate detector behavior on independently labeled, source-matched real observations, including benign operational edge cases; report uncertainty and class balance.
+5. Validate any candidate probabilistic model on a held-out dataset split by aircraft and time, with calibration and model disagreement evidence before enabling live use.
+6. Add additional authorized sources and receiver observations before showing cross-source or receiver consistency as available.

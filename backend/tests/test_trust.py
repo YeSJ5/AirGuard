@@ -136,3 +136,57 @@ def test_trust_history_empty_and_single():
     assert len(hist_single) == 1
     assert hist_single[0]["trust_score"] == 80.0
     assert classify_trust_pattern(hist_single) == "STABLE"
+
+
+def test_derive_trust_score_canonical_formula():
+    """Confirms canonical formula trust_score = clamp((1.0 - combined_risk) * 100, 0, 100)."""
+    from app.detection.trust import derive_trust_score
+
+    assert derive_trust_score(None) is None
+    assert derive_trust_score(0.0) == 100.0
+    assert derive_trust_score(0.08) == 92.0
+    assert derive_trust_score(0.25) == 75.0
+    assert derive_trust_score(0.70) == 30.0
+    assert derive_trust_score(1.0) == 0.0
+    # Clamping boundaries
+    assert derive_trust_score(-0.1) == 100.0
+    assert derive_trust_score(1.5) == 0.0
+
+
+def test_evidence_confidence_and_unavailable_reasons():
+    """Confirms evidence coverage calculation based only on available detector layers."""
+    from app.detection.autoencoder import compute_evidence_confidence
+
+    # 1. Physics rules only (rule weight = 0.40 out of 1.0 total max weight)
+    conf_rules, unav_rules = compute_evidence_confidence(
+        rule_flags=[False, False, False, False, None, None],
+        ensemble_score=None,
+        autoencoder_score=None,
+        trilateration_consistency=None
+    )
+    assert conf_rules == 0.40
+    assert "Ensemble model features not fully available" in unav_rules
+    assert "Autoencoder history accumulating (< 5 observations)" in unav_rules
+    assert "Independent receiver observations unavailable" in unav_rules
+
+    # 2. Physics rules + Autoencoder (0.40 + 0.30 = 0.70 confidence)
+    conf_ae, unav_ae = compute_evidence_confidence(
+        rule_flags=[False, False, False, False, None, None],
+        ensemble_score=None,
+        autoencoder_score=0.05,
+        trilateration_consistency=None
+    )
+    assert conf_ae == 0.70
+    assert "Autoencoder history accumulating (< 5 observations)" not in unav_ae
+    assert "Ensemble model features not fully available" in unav_ae
+    assert "Independent receiver observations unavailable" in unav_ae
+
+    # 3. All 4 layers available (1.0 confidence)
+    conf_all, unav_all = compute_evidence_confidence(
+        rule_flags=[False, False, False, False, False, False],
+        ensemble_score=0.10,
+        autoencoder_score=0.05,
+        trilateration_consistency=0.02
+    )
+    assert conf_all == 1.0
+    assert len(unav_all) == 0

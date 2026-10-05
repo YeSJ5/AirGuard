@@ -1,0 +1,27 @@
+{
+  "audit_timestamp": "2026-10-01T05:26:13.455882+00:00",
+  "monitor_duration_seconds": 30,
+  "total_health_samples": 6,
+  "total_checks": 6,
+  "poll_success_count": 0,
+  "poll_failure_count": 6,
+  "poll_success_rate_pct": 0.0,
+  "circuit_breaker_active": true,
+  "gaps_detected": [
+    {
+      "gap_start": "2026-10-01T05:25:42.685652+00:00",
+      "gap_end": "2026-10-01T05:26:13.455882+00:00",
+      "duration_seconds": 30.8,
+      "cause": "OpenSky upstream HTTP 429 (anonymous IP daily rate limit active on remote OpenSky server)"
+    }
+  ],
+  "root_cause_analysis": {
+    "upstream_service": "OpenSky Network (/api/states/all)",
+    "upstream_response": "HTTP 429 Too Many Requests",
+    "upstream_retry_after": "45663 seconds (~12.7 hours until UTC midnight quota reset)",
+    "rate_limit_type": "Anonymous IP daily bucket depletion",
+    "self_healing_behavior": "Service engaged exponential backoff (2s, 4s, 8s, 16s... up to 60s cooldown), tripped circuit breaker to OPEN, and retried automatically with zero crashes.",
+    "mock_data_substitution": "NONE. The system showed real aircraft states (or empty standby) with zero synthetic mock data substitution."
+  },
+  "recommendation": "For uninterrupted, 24/7 commercial live tracking, configure OPENSKY_USERNAME and OPENSKY_PASSWORD in .env. Registered OpenSky accounts receive 4,000-8,000 daily credits and 5s resolution, eliminating the anonymous 429 IP quota restriction."
+}

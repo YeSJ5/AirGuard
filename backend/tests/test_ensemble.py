@@ -24,10 +24,19 @@ def test_ensemble_fallback():
         feature_vector = np.array([0.0, 0.0, 0.0, 8.0, 1.0, 0.0, 0.0, 0.0, 0.0])
         prob, explanation = ensemble.predict_anomaly(feature_vector)
         
-        assert prob == 0.3
-        assert explanation["note"] == "fallback_no_trained_model"
-        assert len(explanation["top_features"]) == 1
-        assert explanation["top_features"][0]["feature"] == "rule_position_jump"
+        assert prob is None
+        assert explanation["status"] == "unavailable"
+        assert explanation["reason"] == "No trained ensemble model is loaded."
+
+def test_disabled_ensemble_does_not_load_artifact(monkeypatch):
+    def fail_if_loaded(_path):
+        raise AssertionError("disabled live ML must not deserialize an artifact")
+
+    monkeypatch.setattr("app.detection.ensemble.joblib.load", fail_if_loaded)
+    ensemble = TrustScoringEnsemble(load_artifact=False)
+
+    assert ensemble.model is None
+    assert ensemble.predict_anomaly(np.zeros(9))[0] is None
 
 def test_ensemble_training_and_shap():
     # Train a mini ensemble and save it to a temporary test file path
@@ -51,6 +60,7 @@ def test_ensemble_training_and_shap():
             
             ensemble = TrustScoringEnsemble()
             assert ensemble.model is not None
+            assert ensemble.get_explainer() is not None
             assert ensemble.explainer is not None
             
             # Predict normal vector (all zeros, 9 features)

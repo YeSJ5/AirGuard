@@ -78,8 +78,8 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - RUN_INGESTION=true
       - ENABLE_IN_PROCESS_DETECTION=false
-      - OPENSKY_USERNAME=${OPENSKY_USERNAME:-}
-      - OPENSKY_PASSWORD=${OPENSKY_PASSWORD:-}
+      - OPENSKY_CLIENT_ID=${OPENSKY_CLIENT_ID:-}
+      - OPENSKY_CLIENT_SECRET=${OPENSKY_CLIENT_SECRET:-}
       - OPENSKY_GLOBAL_VIEW=true
     ports:
       - "8001:8001"
@@ -105,6 +105,8 @@ services:
       - JAEGER_HOST=jaeger
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - ENABLE_IN_PROCESS_DETECTION=false
+      - OPENSKY_CLIENT_ID=${OPENSKY_CLIENT_ID:-}
+      - OPENSKY_CLIENT_SECRET=${OPENSKY_CLIENT_SECRET:-}
     command: python app/worker.py
     deploy:
       replicas: 1

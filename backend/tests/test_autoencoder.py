@@ -36,46 +36,43 @@ def test_unsupervised_autoencoder_scoring():
 
 # --- 2. Trilateration Plausibility Tests ---
 
-def test_trilateration_plausibility():
+def test_spatial_receiver_consistency_is_unavailable_without_calibrated_receivers():
     # SF (37.7749, -122.4194)
     # Oakland (37.8044, -122.2712)
     # Fresno (36.7783, -119.4179)
 
-    # Case A: Insufficient sensors (less than 2 valid) -> Inconclusive
+    # OpenSky sensor IDs have no receiver geometry/timing attached, so even
+    # multiple IDs cannot establish trilateration or receiver consistency.
     consistency, reason, evidence = check_trilateration_plausibility(
         aircraft_lat=37.7749, aircraft_lon=-122.4194,
         sensors=["1"] # only one sensor
     )
-    assert consistency == 1.0
-    assert reason == "inconclusive"
-    assert "reason" in evidence
+    assert consistency is None
+    assert reason == "unavailable"
+    assert evidence["receiver_geometry_available"] is False
 
-    # Case B: Consistent geometry (aircraft at SF, sensors in SF & Oakland) -> Consistent
     consistency, reason, evidence = check_trilateration_plausibility(
         aircraft_lat=37.7749, aircraft_lon=-122.4194,
         sensors=["1", "2"]
     )
-    assert consistency == 1.0
-    assert reason == "consistent"
-    assert len(evidence["distances_km"]) == 2
-    assert all(d < 50.0 for d in evidence["distances_km"])
+    assert consistency is None
+    assert reason == "unavailable"
+    assert evidence["receiver_ids_supplied"] == 2
 
-    # Case C: Inconsistent geometry (aircraft at SF, but Fresno sensor "5" reports it, distance ~270km, plus mock invalid sensor) -> Consistent still (distance under 350km)
     consistency, reason, evidence = check_trilateration_plausibility(
         aircraft_lat=37.7749, aircraft_lon=-122.4194,
         sensors=["1", "5"]
     )
-    assert consistency == 1.0
-    assert reason == "consistent"
+    assert consistency is None
+    assert reason == "unavailable"
 
-    # Case D: Inconsistent geometry (aircraft reported far out in Pacific Ocean, but SF & Oakland sensors report it -> distance > 1000km) -> Inconsistent!
     consistency, reason, evidence = check_trilateration_plausibility(
         aircraft_lat=30.0000, aircraft_lon=-130.0000,
         sensors=["1", "2"]
     )
-    assert consistency < 1.0
-    assert "physically inconsistent geometry" in reason
-    assert evidence["max_distance_km"] > 350.0
+    assert consistency is None
+    assert reason == "unavailable"
+    assert evidence["receiver_geometry_available"] is False
 
 
 # --- 3. Combined Scoring Weight Boundary Tests ---

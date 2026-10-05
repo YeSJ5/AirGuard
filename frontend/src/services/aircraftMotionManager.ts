@@ -55,7 +55,7 @@ export interface FlightMotionProps {
 
 export class AircraftMotionManager {
   private registry = new Map<string, AircraftMotionEntry>();
-  private showcaseMode: boolean = true;
+  private showcaseMode: boolean = false;
   private reduceMotion: boolean = false;
   private viewerClockSupplier: (() => JulianDate | undefined) | null = null;
 
@@ -132,9 +132,9 @@ export class AircraftMotionManager {
         speedKnots,
         durationSec,
         cachedPosition: Cartesian3.clone(targetCartesian),
-        positionProp: null as any,
-        orientationProp: null as any,
-        rotationProp: null as any
+        positionProp: sampledPos,
+        orientationProp: new CallbackProperty(() => Quaternion.IDENTITY, false),
+        rotationProp: new CallbackProperty(() => -CesiumMath.toRadians(headingDeg), false)
       };
 
       this.bindProperties(entry);
@@ -210,8 +210,7 @@ export class AircraftMotionManager {
     lng: number,
     altitudeFt: number,
     headingDeg: number,
-    speedKnots: number,
-    _history?: Array<{ lat: number; lng: number }>
+    speedKnots: number
   ): FlightMotionProps {
     let entry = this.registry.get(icao24);
     if (!entry) {

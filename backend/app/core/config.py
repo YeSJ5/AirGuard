@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import model_validator
 
@@ -23,9 +24,9 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
     JAEGER_HOST: str = "127.0.0.1"
     
-    # OpenSky API Configuration
-    OPENSKY_USERNAME: str = ""
-    OPENSKY_PASSWORD: str = ""
+    # OpenSky REST API uses OAuth2 client credentials (never HTTP Basic auth).
+    OPENSKY_CLIENT_ID: str = ""
+    OPENSKY_CLIENT_SECRET: str = ""
     OPENSKY_LAMIN: float = 6.0
     OPENSKY_LOMIN: float = 68.0
     OPENSKY_LAMAX: float = 37.0

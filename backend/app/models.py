@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
-from sqlalchemy import String, Float, Boolean, DateTime, Text, BigInteger, Integer, ForeignKey, Index
+from sqlalchemy import String, Float, Boolean, DateTime, Text, BigInteger, Integer, ForeignKey, Index, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -10,8 +10,10 @@ class AircraftState(Base):
     __tablename__ = "aircraft_states"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ingestion_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     icao24: Mapped[str] = mapped_column(String(6), index=True)
     callsign: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    squawk: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
     latitude: Mapped[float] = mapped_column(Float)
     longitude: Mapped[float] = mapped_column(Float)
     altitude_m: Mapped[float] = mapped_column(Float)
@@ -31,6 +33,7 @@ class AircraftState(Base):
     # Composite Index (icao24, received_at DESC)
     __table_args__ = (
         Index("idx_states_icao_received_desc", "icao24", received_at.desc()),
+        Index("uq_aircraft_states_ingestion_id", "ingestion_id", unique=True),
     )
 
 
@@ -62,7 +65,7 @@ class AircraftAssessment(Base):
     aircraft_state_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("aircraft_states.id", ondelete="CASCADE"), unique=True, nullable=False)
     icao24: Mapped[str] = mapped_column(String(6), index=True, nullable=False)
     combined_risk_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    evidence_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    rule_assessment_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     signals: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     detector_version: Mapped[str] = mapped_column(String(32), nullable=False, default="rules-v2")
@@ -121,6 +124,52 @@ class AuditLog(Base):
 
     # Relationships
     user: Mapped[Optional["User"]] = relationship(back_populates="audit_logs")
+
+
+class AirspaceEventCase(Base):
+    """Analyst-owned case built from an immutable snapshot of real alert evidence."""
+    __tablename__ = "airspace_event_cases"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN", server_default="OPEN", index=True)
+    disposition: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    evidence_snapshot: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_by: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    reviews: Mapped[List["AirspaceEventCaseReview"]] = relationship(back_populates="event_case", cascade="all, delete-orphan", order_by="AirspaceEventCaseReview.created_at")
+
+    __table_args__ = (
+        Index(
+            "uq_airspace_event_cases_open_candidate",
+            "candidate_id",
+            unique=True,
+            postgresql_where=text("status <> 'CLOSED'"),
+        ),
+    )
+
+
+class AirspaceEventCaseReview(Base):
+    """Append-only case state transition and analyst rationale."""
+    __tablename__ = "airspace_event_case_reviews"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    case_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("airspace_event_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    reviewer_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    action: Mapped[str] = mapped_column(String(30), nullable=False)
+    previous_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    previous_disposition: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    new_disposition: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    event_case: Mapped[AirspaceEventCase] = relationship(back_populates="reviews")
 
 
 class FlightRoute(Base):

@@ -137,7 +137,17 @@ frontend/out/
 *.ntvs*
 *.njsproj
 *.sln
-*.sw?
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+db.sqlite3
+db.sqlite3-journal
+
+# Temporary and test output files
+.tmp/
+locust_report*.csv
+test_output.txt
 
 # OS metadata
 .DS_Store

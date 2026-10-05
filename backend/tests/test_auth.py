@@ -32,6 +32,7 @@ def test_static_audit_log_schema():
 @pytest.fixture
 def mock_db():
     session = AsyncMock()
+    session.add = MagicMock()
     return session
 
 # API Role Boundary Tests
@@ -198,4 +199,3 @@ async def test_analyst_updates_config_with_audit_log(mock_db):
     assert audit_calls[0].user_id == analyst_user.id
     
     app.dependency_overrides.clear()
-

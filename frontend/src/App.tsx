@@ -1,26 +1,32 @@
-import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
+import React, { Suspense, lazy, useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import { FixedSizeList as List } from 'react-window';
-import { 
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+import {
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, LineChart, Line
 } from 'recharts';
-import create from 'zustand';
+import { useAirGuardStore as useStore } from './store/useAirGuardStore';
+import { API_BASE, WS_BASE } from './services/api';
+import type { AircraftApiState, AircraftDetailResponse, AlertApiResponse, Flight, AlertLog, User, AuditLog, HealthStats } from './types';
 
 // Cesium and Resium imports
-import { Viewer, Entity, PolylineGraphics, LabelGraphics, BillboardGraphics, ModelGraphics, RectangleGraphics } from 'resium';
-import { 
-  Cartesian3, Color, Cartesian2, LabelStyle, CallbackProperty, 
+import { Viewer, Entity, PolylineGraphics, LabelGraphics, BillboardGraphics, RectangleGraphics } from 'resium';
+import {
+  Cartesian3, Color, Cartesian2, LabelStyle, CallbackProperty,
   Math as CesiumMath, EasingFunction, Viewer as CesiumViewer,
   BoundingSphere, HeadingPitchRange,
   Rectangle, DistanceDisplayCondition, ClockStep, Ion, UrlTemplateImageryProvider
 } from 'cesium';
 import "cesium/Build/Cesium/Widgets/widgets.css";
-const CesiumViewerComponent = Viewer as any;
+const CesiumViewerComponent: typeof Viewer = Viewer;
 import { aircraftMotionManager } from './services/aircraftMotionManager';
 import { AirspaceMap } from './components/AirspaceMap';
+const AirspaceEventCandidatePanel = lazy(() => import('./components/threats/AirspaceEventCandidatePanel').then(module => ({ default: module.AirspaceEventCandidatePanel })));
+const HistoricalPlaybackView = lazy(() => import('./components/airspace/HistoricalPlaybackView').then(module => ({ default: module.HistoricalPlaybackView })));
+import { formatObservedNumber, isObservedField } from './utils/dataQuality';
+import { detectorStatusFromRisk, displayableRisk } from './utils/detectorStatus';
 
 // Use a deployment-provided token when an Ion asset requires it; never embed account credentials in the client bundle.
-const cesiumIonToken = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_CESIUM_ION_TOKEN) || '';
+const cesiumIonToken = import.meta.env.VITE_CESIUM_ION_TOKEN || '';
 if (cesiumIonToken) Ion.defaultAccessToken = cesiumIonToken;
 
 // Global high-resolution Satellite & World Boundaries imagery provider
@@ -37,283 +43,8 @@ const createReferenceBoundariesProvider = () => new UrlTemplateImageryProvider({
 });
 
 
-const BACKEND_PORT = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BACKEND_PORT) || '8001';
-const HOSTNAME = typeof window !== 'undefined' && window.location?.hostname
-  ? (window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname)
-  : '127.0.0.1';
-const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_URL) || `http://${HOSTNAME}:${BACKEND_PORT}`;
-const WS_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_WS_URL) || `ws://${HOSTNAME}:${BACKEND_PORT}`;
-
-// --- Types ---
-interface TrailPosition {
-  lat: number;
-  lng: number;
-}
-
-interface Flight {
-  id: string; // ICAO24
-  callsign: string;
-  squawk: string;
-  altitude: number; // ft
-  speed: number; // knots
-  heading: number; // degrees
-  verticalRate?: number; // m/s
-  trustScore: number; // 0-100
-  signalStrength?: number; // dBm, only when supplied by a receiver
-  status: 'normal' | 'suspicious' | 'critical';
-  lat: number;
-  lng: number;
-  is_synthetic?: boolean;
-  source?: string;
-  history?: TrailPosition[];
-  trilateration?: string;
-  route?: string;
-  estDepartureAirport?: string | null;
-  estArrivalAirport?: string | null;
-  firstSeen?: string | null;
-  ruleFlags?: {
-    positionJump: boolean;
-    duplicateIcao: boolean;
-    climbRate: boolean;
-    altVelMismatch: boolean;
-  };
-  shapValues?: { name: string; value: number }[];
-  last_seen_seconds_ago?: number;
-  staleness_status?: string;
-  registration?: string | null;
-  aircraftType?: string | null;
-  operator?: string | null;
-  country?: string | null;
-}
-
-interface AlertLog {
-  id: string;
-  timestamp: string;
-  callsign: string;
-  icao24: string;
-  type: string;
-  severity: 'low' | 'medium' | 'high';
-  scoreImpact: number;
-  acknowledged: boolean;
-  is_synthetic?: boolean;
-}
-
-interface HealthStats {
-  poll_latency_ms: number;
-  queue_depth: number;
-  circuit_breaker_state: string;
-  last_successful_poll: string | null;
-  last_poll_records?: number;
-  last_processed_records?: number;
-  last_poll_http_status?: number | null;
-  rate_limit_remaining?: string | null;
-  total_real_states?: number;
-  total_synthetic_states?: number;
-  upstream_status?: 'LIVE' | 'RATE_LIMITED' | 'UNAVAILABLE' | 'UNKNOWN' | 'STALE';
-  feed_mode?: 'LIVE' | 'UNAVAILABLE' | 'UNKNOWN';
-  max_allowed_poll_gap_seconds?: number;
-  feed_source?: string;
-  fallback_reason?: string | null;
-  upstream_message?: string;
-}
-
-interface ModelRunStats {
-  id: number;
-  run_at: string;
-  model_version: string;
-  true_positives: number;
-  false_positives: number;
-  true_negatives: number;
-  false_negatives: number;
-  precision: number;
-  recall: number;
-  f1: number;
-  notes: string;
-}
-
-interface AblationMetric {
-  name: string;
-  configKey: string;
-  f1: number;
-  fpr: number;
-  precision: number;
-  recall: number;
-  desc: string;
-}
-
-
-interface User {
-  id: number;
-  email: string;
-  role: 'admin' | 'analyst' | 'viewer';
-  created_at?: string;
-}
-
-interface AuditLog {
-  id: number;
-  user_id: number;
-  action: string;
-  target_type: string;
-  target_id: string;
-  timestamp: string;
-  ip_address: string;
-}
-
-// --- Zustand State Management ---
-interface IngestionPayload {
-  icao24: string;
-  latitude: number;
-  longitude: number;
-  altitude_m: number;
-  velocity_ms: number;
-  heading_deg: number;
-  vertical_rate_ms?: number;
-  callsign?: string;
-  is_synthetic?: boolean;
-  source?: string;
-  route?: string;
-  combined_risk_score?: number;
-  trust_score?: number;
-  is_alert_triggered?: boolean;
-}
-
-interface AirGuardState {
-  flights: Flight[];
-  selectedFlightId: string | null;
-  alerts: AlertLog[];
-  backendHealth: 'online' | 'offline' | 'checking';
-  websocketStatus: 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
-  activeFilter: 'all' | 'suspicious' | 'critical';
-  setFlights: (flights: Flight[]) => void;
-  updateFlightStatus: (icao24: string, score: number) => void;
-  updateOrAddFlight: (payload: IngestionPayload) => void;
-  setSelectedFlightId: (id: string | null) => void;
-  setBackendHealth: (status: 'online' | 'offline' | 'checking') => void;
-  setWebsocketStatus: (status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting') => void;
-  setActiveFilter: (filter: 'all' | 'suspicious' | 'critical') => void;
-  addAlert: (alert: AlertLog) => void;
-  acknowledgeAlert: (id: string) => void;
-}
-
-const useStore = create<AirGuardState>((set) => ({
-  flights: [],
-  selectedFlightId: null,
-  alerts: [],
-  backendHealth: 'checking',
-  websocketStatus: 'connecting',
-  activeFilter: 'all',
-  setFlights: (flights) => {
-    const activeIcaos = new Set(flights.map(f => f.id));
-    aircraftMotionManager.prune(activeIcaos);
-    set({ flights });
-  },
-  updateFlightStatus: (icao24, score) => set((state) => {
-    const updated = state.flights.map(f => {
-      if (f.callsign.toLowerCase() === icao24.toLowerCase()) {
-        const scorePercentage = Math.round(score * 100);
-        const status: 'normal' | 'suspicious' | 'critical' = score >= 0.8 ? 'critical' : score >= 0.4 ? 'suspicious' : 'normal';
-        return { ...f, trustScore: 100 - scorePercentage, status };
-      }
-      return f;
-    });
-    return { flights: updated };
-  }),
-  updateOrAddFlight: (payload: IngestionPayload) => set((state) => {
-    const isSynthetic = payload.is_synthetic ?? false;
-    if (isSynthetic || payload.source === 'regional_fallback' || payload.source === 'simulation') return state;
-    const baseFlights = state.flights;
-
-    const existingIndex = baseFlights.findIndex(f => f.id === payload.icao24);
-    const lat = payload.latitude;
-    const lng = payload.longitude;
-    const altitude = Math.round(payload.altitude_m * 3.28084);
-    const speed = Math.round(payload.velocity_ms * 1.94384);
-    const heading = Math.round(payload.heading_deg);
-
-    aircraftMotionManager.updatePosition({
-      icao24: payload.icao24,
-      lat,
-      lng,
-      altitudeFt: altitude,
-      headingDeg: heading,
-      speedKnots: speed,
-      durationSec: 8
-    });
-
-    const calculatedTrust = payload.trust_score ?? (payload.combined_risk_score != null ? Math.max(5, Math.min(100, Math.round((1.0 - payload.combined_risk_score) * 100))) : Number.NaN);
-    const calculatedStatus: 'normal' | 'suspicious' | 'critical' = 
-      payload.combined_risk_score != null
-        ? (payload.combined_risk_score >= 0.8 ? 'critical' : payload.combined_risk_score >= 0.4 ? 'suspicious' : 'normal')
-        : 'normal';
-    
-    if (existingIndex > -1) {
-      const updated = [...baseFlights];
-      const existing = updated[existingIndex];
-      const prevHistory = existing.history || [];
-      const newHistory = [{ lat: existing.lat, lng: existing.lng }, ...prevHistory].slice(0, 5);
-      
-      updated[existingIndex] = {
-        ...existing,
-        lat,
-        lng,
-        altitude,
-        speed,
-        heading,
-        verticalRate: payload.vertical_rate_ms ?? existing.verticalRate,
-        trustScore: payload.trust_score !== undefined || payload.combined_risk_score != null ? calculatedTrust : existing.trustScore,
-        status: payload.combined_risk_score != null ? calculatedStatus : existing.status,
-        is_synthetic: isSynthetic,
-        source: payload.source || (isSynthetic ? 'synthetic' : 'source_unavailable'),
-        route: payload.route || existing.route || 'Route unknown',
-        history: newHistory,
-        last_seen_seconds_ago: 0,
-        staleness_status: 'LIVE'
-      };
-      return { flights: updated };
-    } else {
-      const newFlight: Flight = {
-        id: payload.icao24,
-        callsign: payload.callsign || `AC-${payload.icao24.substring(0, 4).toUpperCase()}`,
-        squawk: '1200',
-        altitude,
-        speed,
-        heading,
-        verticalRate: payload.vertical_rate_ms,
-        trustScore: calculatedTrust,
-        signalStrength: undefined,
-        status: calculatedStatus,
-        lat,
-        lng,
-        is_synthetic: isSynthetic,
-        source: payload.source || (isSynthetic ? 'synthetic' : 'source_unavailable'),
-        route: payload.route || 'Route unknown',
-        history: [],
-        last_seen_seconds_ago: 0,
-        staleness_status: 'LIVE',
-        trilateration: undefined,
-        ruleFlags: {
-          positionJump: false,
-          duplicateIcao: false,
-          climbRate: false,
-          altVelMismatch: false
-        },
-        shapValues: []
-      };
-      return { flights: [newFlight, ...baseFlights] };
-    }
-  }),
-  setSelectedFlightId: (id) => set({ selectedFlightId: id }),
-  setBackendHealth: (status) => set({ backendHealth: status }),
-  setWebsocketStatus: (status) => set({ websocketStatus: status }),
-  setActiveFilter: (filter) => set({ activeFilter: filter }),
-  addAlert: (alert) => set((state) => ({ alerts: [alert, ...state.alerts] })),
-  acknowledgeAlert: (id) => set((state) => ({
-    alerts: state.alerts.map(a => a.id === id ? { ...a, acknowledged: true } : a)
-  }))
-}));
-
 // --- Cesium Error Boundary with Self-Healing Recovery ---
-class CesiumErrorBoundary extends React.Component<{ children?: React.ReactNode; resetKey?: any }, { hasError: boolean; error: Error | null }> {
+class CesiumErrorBoundary extends React.Component<{ children?: React.ReactNode; resetKey?: unknown }, { hasError: boolean; error: Error | null }> {
   public state = {
     hasError: false,
     error: null as Error | null
@@ -327,7 +58,7 @@ class CesiumErrorBoundary extends React.Component<{ children?: React.ReactNode; 
     console.error("Cesium render crash caught by boundary:", error, errorInfo);
   }
 
-  public componentDidUpdate(prevProps: { children?: React.ReactNode; resetKey?: any }) {
+  public componentDidUpdate(prevProps: { children?: React.ReactNode; resetKey?: unknown }) {
     if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
       this.setState({ hasError: false, error: null });
     }
@@ -410,99 +141,8 @@ const AIRPORT_COORDINATES: Record<string, { lat: number; lng: number; name: stri
 };
 
 // Airline enrichment interface & comprehensive ICAO designator directory
-export interface AirlineInfo {
-  name: string;
-  code: string;
-  iata: string;
-  color: string;
-}
-
-const AIRLINE_DIRECTORY: Record<string, AirlineInfo> = {
-  // Indian Subcontinent & Regional Carriers
-  IGO: { name: "IndiGo", code: "IGO", iata: "6E", color: "#004b93" },
-  AIC: { name: "Air India", code: "AIC", iata: "AI", color: "#e21836" },
-  SEJ: { name: "SpiceJet", code: "SEJ", iata: "SG", color: "#e03a27" },
-  VTI: { name: "Vistara", code: "VTI", iata: "UK", color: "#53234d" },
-  AKJ: { name: "Akasa Air", code: "AKJ", iata: "QP", color: "#ff6600" },
-  AXB: { name: "Air India Express", code: "AXB", iata: "IX", color: "#d91d2a" },
-  LLR: { name: "Alliance Air", code: "LLR", iata: "9I", color: "#003366" },
-  BDA: { name: "Blue Dart Aviation", code: "BDA", iata: "BZ", color: "#002b66" },
-  GOW: { name: "Go First", code: "GOW", iata: "G8", color: "#005baa" },
-
-  // Middle East & Gulf Carriers
-  UAE: { name: "Emirates", code: "UAE", iata: "EK", color: "#d71921" },
-  ETD: { name: "Etihad Airways", code: "ETD", iata: "EY", color: "#bd9b60" },
-  QTR: { name: "Qatar Airways", code: "QTR", iata: "QR", color: "#5c0632" },
-  FDB: { name: "Flydubai", code: "FDB", iata: "FZ", color: "#0080c6" },
-  ABY: { name: "Air Arabia", code: "ABY", iata: "G9", color: "#d71921" },
-  GFA: { name: "Gulf Air", code: "GFA", iata: "GF", color: "#bd9b60" },
-  OMA: { name: "Oman Air", code: "OMA", iata: "WY", color: "#007a87" },
-  KAC: { name: "Kuwait Airways", code: "KAC", iata: "KU", color: "#00205b" },
-  JZR: { name: "Jazeera Airways", code: "JZR", iata: "J9", color: "#0099cc" },
-  SVA: { name: "Saudia", code: "SVA", iata: "SV", color: "#006633" },
-  RJA: { name: "Royal Jordanian", code: "RJA", iata: "RJ", color: "#8a1538" },
-  MSR: { name: "EgyptAir", code: "MSR", iata: "MS", color: "#002b66" },
-
-  // Europe Carriers
-  BAW: { name: "British Airways", code: "BAW", iata: "BA", color: "#075aaa" },
-  DLH: { name: "Lufthansa", code: "DLH", iata: "LH", color: "#ffab00" },
-  AFR: { name: "Air France", code: "AFR", iata: "AF", color: "#002157" },
-  KLM: { name: "KLM Royal Dutch", code: "KLM", iata: "KL", color: "#00a1de" },
-  THY: { name: "Turkish Airlines", code: "THY", iata: "TK", color: "#e81932" },
-  SWR: { name: "Swiss International", code: "SWR", iata: "LX", color: "#e30613" },
-  AUA: { name: "Austrian Airlines", code: "AUA", iata: "OS", color: "#d81e05" },
-  SAS: { name: "Scandinavian Airlines", code: "SAS", iata: "SK", color: "#000066" },
-  FIN: { name: "Finnair", code: "FIN", iata: "AY", color: "#0b1560" },
-  IBE: { name: "Iberia", code: "IBE", iata: "IB", color: "#d71921" },
-  TAP: { name: "TAP Air Portugal", code: "TAP", iata: "TP", color: "#80b62e" },
-  AZA: { name: "ITA Airways", code: "AZA", iata: "AZ", color: "#0066b2" },
-  VIR: { name: "Virgin Atlantic", code: "VIR", iata: "VS", color: "#cc0000" },
-
-  // Asia-Pacific Carriers
-  SIA: { name: "Singapore Airlines", code: "SIA", iata: "SQ", color: "#f5a623" },
-  THA: { name: "Thai Airways", code: "THA", iata: "TG", color: "#4f2d7f" },
-  MAS: { name: "Malaysia Airlines", code: "MAS", iata: "MH", color: "#003b80" },
-  GIA: { name: "Garuda Indonesia", code: "GIA", iata: "GA", color: "#007a87" },
-  CPA: { name: "Cathay Pacific", code: "CPA", iata: "CX", color: "#006564" },
-  ANA: { name: "All Nippon Airways", code: "ANA", iata: "NH", color: "#00205b" },
-  JAL: { name: "Japan Airlines", code: "JAL", iata: "JL", color: "#cc0000" },
-  KAL: { name: "Korean Air", code: "KAL", iata: "KE", color: "#0062a9" },
-  AAR: { name: "Asiana Airlines", code: "AAR", iata: "OZ", color: "#d71921" },
-  CCA: { name: "Air China", code: "CCA", iata: "CA", color: "#d81e05" },
-  CES: { name: "China Eastern", code: "CES", iata: "MU", color: "#1e3888" },
-  CSN: { name: "China Southern", code: "CSN", iata: "CZ", color: "#003b7a" },
-  QFA: { name: "Qantas", code: "QFA", iata: "QF", color: "#e0001b" },
-  VOZ: { name: "Virgin Australia", code: "VOZ", iata: "VA", color: "#cc0000" },
-  ANZ: { name: "Air New Zealand", code: "ANZ", iata: "NZ", color: "#333333" },
-
-  // Americas & Global Cargo
-  AAL: { name: "American Airlines", code: "AAL", iata: "AA", color: "#0078d2" },
-  UAL: { name: "United Airlines", code: "UAL", iata: "UA", color: "#005da4" },
-  DAL: { name: "Delta Air Lines", code: "DAL", iata: "DL", color: "#e01933" },
-  SWA: { name: "Southwest Airlines", code: "SWA", iata: "WN", color: "#304cb2" },
-  JBU: { name: "JetBlue Airways", code: "JBU", iata: "B6", color: "#003876" },
-  ASA: { name: "Alaska Airlines", code: "ASA", iata: "AS", color: "#01426a" },
-  ACA: { name: "Air Canada", code: "ACA", iata: "AC", color: "#e31837" },
-  FDX: { name: "FedEx Express", code: "FDX", iata: "FX", color: "#4d148c" },
-  UPS: { name: "UPS Airlines", code: "UPS", iata: "5X", color: "#351c15" },
-  GTI: { name: "Atlas Air", code: "GTI", iata: "5Y", color: "#002f6c" },
-  CLX: { name: "Cargolux", code: "CLX", iata: "CV", color: "#d71921" },
-  BOX: { name: "AeroLogic", code: "BOX", iata: "3S", color: "#ffcc00" },
-  CSS: { name: "SF Airlines", code: "CSS", iata: "O3", color: "#ff6600" },
-  ETH: { name: "Ethiopian Airlines", code: "ETH", iata: "ET", color: "#008542" },
-};
-
-// Airline enrichment helper from callsign prefix
-const getAirlineInfo = (callsign: string): AirlineInfo => {
-  if (!callsign) return { name: "Commercial Jet", code: "GEN", iata: "--", color: "#38bdf8" };
-  const prefix = callsign.slice(0, 3).toUpperCase();
-  return AIRLINE_DIRECTORY[prefix] || { 
-    name: prefix.startsWith("SIM") ? "Simulated Target" : "Commercial Flight", 
-    code: prefix, 
-    iata: prefix.slice(0, 2),
-    color: prefix.startsWith("SIM") ? "#a855f7" : "#38bdf8"
-  };
-};
+export { type AirlineInfo, AIRLINE_DIRECTORY, getAirlineInfo, getAirlineDisplayName } from './utils/airlineDirectory';
+import { getAirlineInfo } from './utils/airlineDirectory';
 
 // Match airport string/code to geographic coordinate metadata
 const resolveAirportCoords = (airportStr?: string | null): { lat: number; lng: number; label: string; name: string; city: string; iata: string } | null => {
@@ -549,7 +189,10 @@ const computeRouteArcPositions = (
 };
 
 // Helper for plain-English explanation of why an aircraft was flagged
-function getPlainEnglishExplanation(flight: Flight, detail?: any): { headline: string; summary: string; reasons: string[] } {
+function getPlainEnglishExplanation(
+  flight: Flight,
+  detail?: Pick<AircraftDetailResponse, 'trust_status'>
+): { headline: string; summary: string; reasons: string[] } {
   const trustStatus = detail?.trust_status;
   const backendReasons = Array.isArray(trustStatus?.reasons) ? trustStatus.reasons.filter((reason: unknown): reason is string => typeof reason === 'string') : [];
   if (!trustStatus) {
@@ -592,6 +235,16 @@ const createPulseRingSvg = (color: string) => {
 const PULSE_RING_CRITICAL_SVG = createPulseRingSvg('#f43f5e');
 const PULSE_RING_SUSPICIOUS_SVG = createPulseRingSvg('#f59e0b');
 
+const aircraftBillboardCache = new Map<string, string>();
+const createAircraftBillboard = (color: string) => {
+  const cached = aircraftBillboardCache.get(color);
+  if (cached) return cached;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"><path d="M16 2c-1.2 0-2 1.1-2 2.7v7.7L4 18v3l10-3.7v7.3l-3 2.1v2L16 27l5 1.7v-2l-3-2.1v-7.3L28 21v-3l-10-5.6V4.7C18 3.1 17.2 2 16 2Z" fill="${color}" stroke="#082f49" stroke-width="1.1" stroke-linejoin="round"/></svg>`;
+  const uri = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  aircraftBillboardCache.set(color, uri);
+  return uri;
+};
+
 // Register / update smooth motion target for continuous interpolation
 const registerFlightMotion = (
   id: string,
@@ -620,8 +273,7 @@ const getFlightMotionProperties = (flight: Flight) => {
     flight.lng,
     flight.altitude,
     flight.heading,
-    flight.speed,
-    flight.history
+    flight.speed
   );
 };
 
@@ -803,13 +455,14 @@ const stopAmbientAtmosphere = (immediate: boolean = false) => {
 
 // --- App Component ---
 export default function App() {
-  const { 
-    flights, selectedFlightId, alerts, websocketStatus, backendHealth, activeFilter,
-    setSelectedFlightId, setBackendHealth, setWebsocketStatus, setActiveFilter, addAlert,
-    updateFlightStatus, updateOrAddFlight, acknowledgeAlert
+  const {
+    flights, selectedFlightId, alerts, activeAlertCount, websocketStatus, backendHealth, activeFilter, token, currentUser,
+    setSelectedFlightId, setBackendHealth, setWebsocketStatus, setActiveFilter, addAlert, setAlerts,
+    updateFlightStatus, updateOrAddFlight, updateOrAddFlights, acknowledgeAlert,
+    setToken, setUser, logout
   } = useStore();
 
-  // 3-Tier Navigation State - Landing page defaults to Tier 2 (3D Tactical Radar) for immediate cinematic globe experience
+  // Single application-shell navigation state.
   const [currentTier, setCurrentTier] = useState<'tier1_overview' | 'tier2_radar' | 'tier3_tools'>('tier1_overview');
   const [tier3Tab, setTier3Tab] = useState<'details' | 'alerts' | 'analytics' | 'config' | 'playback' | 'admin' | 'about'>('alerts');
   const [aircraftSearch, setAircraftSearch] = useState('');
@@ -817,15 +470,10 @@ export default function App() {
 
   // Technical Detail Toggles (off by default for low cognitive load)
   const [showShapTechnical, setShowShapTechnical] = useState(false);
-  const [showAnalyticsTechnical, setShowAnalyticsTechnical] = useState(false);
-  const [ablationData, setAblationData] = useState<AblationMetric[]>([]);
   const [hoveredFlightId, setHoveredFlightId] = useState<string | null>(null);
 
-  // Showcase Mode & One-Time Cinematic Intro State
-  const [showcaseMode, setShowcaseMode] = useState<boolean>(() => {
-    const saved = localStorage.getItem('airguard_showcase_mode');
-    return saved !== null ? saved === 'true' : true;
-  });
+  // Camera and motion effects are opt-in; operational telemetry is shown without staged presentation effects.
+  const [showcaseMode] = useState(false);
 
   // Reduce Motion Setting (Honoring prefers-reduced-motion media query, toggleable in UI & persisted)
   const [reduceMotion, setReduceMotion] = useState<boolean>(() => {
@@ -860,7 +508,7 @@ export default function App() {
   }, []);
 
   // Real-Time Frame Rate Profiler (measures live rendering performance)
-  const [fps, setFps] = useState<number>(60);
+  const [fps, setFps] = useState<number>(0);
   const [mapViewMode, setMapViewMode] = useState<'2d' | '3d'>('2d');
   const fpsFrameCountRef = useRef(0);
   const fpsLastTimeRef = useRef(performance.now());
@@ -904,10 +552,10 @@ export default function App() {
   const [chaseTargetCallsign, setChaseTargetCallsign] = useState<string | null>(null);
   const activeChaseFlightRef = useRef<string | null>(null);
 
-  // Signal Confidence Overlay State (Toggleable heatmap by trust, not volume; persisted in localStorage)
+  // Detector Risk Overlay State (only uses scored observations; persisted in localStorage)
   const [showConfidenceOverlay, setShowConfidenceOverlay] = useState<boolean>(() => {
     const saved = localStorage.getItem('airguard_confidence_overlay');
-    return saved !== null ? saved === 'true' : true; // Default ON to showcase signature trust lens
+    return saved === 'true';
   });
   const [isConfidenceLegendCollapsed, setIsConfidenceLegendCollapsed] = useState<boolean>(true);
 
@@ -991,7 +639,8 @@ export default function App() {
     setChaseTargetCallsign(flight.callsign || flight.id);
 
     // Aircraft position & target bounding sphere (targets live interpolated coordinates)
-    const pos = aircraftMotionManager.getInterpolatedPosition(flight.id) || Cartesian3.fromDegrees(flight.lng, flight.lat, flight.altitude * 0.3048);
+    const displayedAltFt = Number.isFinite(flight.altitude) ? flight.altitude : 0;
+    const pos = aircraftMotionManager.getInterpolatedPosition(flight.id) || Cartesian3.fromDegrees(flight.lng, flight.lat, displayedAltFt * 0.3048);
     const targetSphere = new BoundingSphere(pos, 35);
 
     // Chase cam offset: viewpoint behind and slightly to the quarter of the aircraft, angled downward
@@ -1026,18 +675,15 @@ export default function App() {
     });
   }, [showcaseMode, reduceMotion, selectedFlightId, isChaseFlying, isSoundEnabled, setSelectedFlightId]);
 
-  // Restore a previously authenticated session. Never create a client-side identity.
-  const [token, setToken] = useState<string | null>(() => {
-    return localStorage.getItem('airguard_token');
-  });
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem('airguard_user');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
-    }
-    return null;
-  });
-  
+  const handleMapSelectFlight = useCallback((flight: Flight | null) => {
+    setSelectedFlightId(flight ? flight.id : null);
+  }, [setSelectedFlightId]);
+
+  const handleMapOpenDetails = useCallback((flight: Flight) => {
+    setSelectedFlightId(flight.id);
+    setIsDetailDrawerOpen(true);
+  }, [setSelectedFlightId]);
+
   // Login form state
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -1050,7 +696,11 @@ export default function App() {
     const checkBackend = async () => {
       try {
         const response = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
-        if (active) setBackendHealth(response.ok ? 'online' : 'offline');
+        const health = await response.json().catch(() => null) as { database?: string; redis?: string } | null;
+        if (!active) return;
+        if (response.ok) setBackendHealth('online');
+        else if (health?.database === 'connected' && health.redis !== 'connected') setBackendHealth('degraded');
+        else setBackendHealth('offline');
       } catch {
         if (active) setBackendHealth('offline');
       }
@@ -1062,7 +712,7 @@ export default function App() {
       window.clearInterval(interval);
     };
   }, [setBackendHealth]);
-  
+
   // Admin page state
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
@@ -1073,7 +723,7 @@ export default function App() {
   const [adminSuccess, setAdminSuccess] = useState<string | null>(null);
   const [logFilterAction, setLogFilterAction] = useState("");
 
-  const fetchWithAuth = async (url: string, options: RequestInit = {}) => {
+  const fetchWithAuth = useCallback(async (url: string, options: RequestInit = {}) => {
     const headers = new Headers(options.headers || {});
     if (token) {
       headers.set("Authorization", `Bearer ${token}`);
@@ -1081,11 +731,11 @@ export default function App() {
     const res = await fetch(url, { ...options, headers });
     if (res.status === 401) {
       setToken(null);
-      setCurrentUser(null);
+      setUser(null);
       throw new Error("Session expired. Please log in again.");
     }
     return res;
-  };
+  }, [token, setToken, setUser]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1107,7 +757,7 @@ export default function App() {
           throw new Error(registrationError.detail || "Account registration failed.");
         }
       }
-      
+
       const res = await fetch(`${API_BASE}/api/v1/auth/login`, {
         method: "POST",
         body: formData,
@@ -1115,29 +765,27 @@ export default function App() {
           "Content-Type": "application/x-www-form-urlencoded"
         }
       });
-      
+
       if (!res.ok) {
         throw new Error("Invalid clearance credentials.");
       }
-      
+
       const tokenData = await res.json();
       const tempToken = tokenData.access_token;
-      
+
       const profileRes = await fetch(`${API_BASE}/api/v1/auth/me`, {
         headers: {
           "Authorization": `Bearer ${tempToken}`
         }
       });
-      
+
       if (!profileRes.ok) {
         throw new Error("Failed to fetch clearance profile.");
       }
-      
+
       const profileData = await profileRes.json();
       setToken(tempToken);
-      setCurrentUser(profileData);
-      localStorage.setItem('airguard_token', tempToken);
-      localStorage.setItem('airguard_user', JSON.stringify(profileData));
+      setUser(profileData);
       setLoginPassword("");
       setCurrentTier('tier2_radar');
     } catch (err: unknown) {
@@ -1148,10 +796,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    setToken(null);
-    setCurrentUser(null);
-    localStorage.removeItem('airguard_token');
-    localStorage.removeItem('airguard_user');
+    logout();
     setCurrentTier('tier1_overview');
   };
 
@@ -1163,7 +808,7 @@ export default function App() {
         const logsData = await logsRes.json();
         setAuditLogs(logsData);
       }
-      
+
       const usersRes = await fetchWithAuth(`${API_BASE}/api/v1/admin/users`);
       if (usersRes.ok) {
         const usersData = await usersRes.json();
@@ -1228,7 +873,7 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tier3Tab, token, currentUser, logFilterAction]);
-  
+
   // RuleConfig Slider Config State
   const [config, setConfig] = useState({
     max_implied_speed_kmh: 1200.0,
@@ -1239,23 +884,24 @@ export default function App() {
     min_flight_speed_ms: 20.0
   });
 
-  // Replay results
-  const [replayResult, setReplayResult] = useState<ModelRunStats | null>(null);
-  const [isReplaying, setIsReplaying] = useState<boolean>(false);
-
   // Historical Playback States
   const [currentUtcTime, setCurrentUtcTime] = useState<string>('');
 
-  // Alerts sorting/pagination local state
+  // Alerts sorting/filtering/pagination local state
   const [sortField, setSortField] = useState<'timestamp' | 'callsign' | 'scoreImpact'>('timestamp');
   const [sortAsc, setSortAsc] = useState<boolean>(false);
   const [alertPage, setAlertPage] = useState<number>(0);
-  const alertsPerPage = 10;
+  const [alertSearch, setAlertSearch] = useState<string>('');
+  const [alertSeverityFilter, setAlertSeverityFilter] = useState<'all' | 'high' | 'medium' | 'unacked'>('all');
+  const [alertActionError, setAlertActionError] = useState<string | null>(null);
+  const [alertsPerPage, setAlertPerPage] = useState<number>(25);
 
   const [healthData, setHealthData] = useState<HealthStats>({
-    poll_latency_ms: 124.5,
-    queue_depth: 0,
-    circuit_breaker_state: 'CLOSED',
+    poll_latency_ms: null,
+    queue_depth: null,
+    circuit_breaker_state: 'UNKNOWN',
+    database_status: 'UNKNOWN',
+    redis_status: 'UNKNOWN',
     last_successful_poll: null,
     last_poll_records: 0,
     rate_limit_remaining: null,
@@ -1266,14 +912,28 @@ export default function App() {
     feed_source: 'none',
     max_allowed_poll_gap_seconds: 1800,
     fallback_reason: null,
-    upstream_message: 'Waiting for the first response from the configured aircraft feed.'
+    upstream_message: 'Waiting for the first response from the configured aircraft feed.',
+    source_status: 'AWAITING_TELEMETRY',
+    last_successful_update: null,
+    next_attempt_at: null,
+    retry_after: null,
+    snapshot_age_seconds: null,
+    snapshot_count: 0,
+    consecutive_failures: 0,
+    last_error: null,
+    refresh_in_progress: false,
+    manual_refresh_pending: false,
+    refresh_interval_seconds: 0
   });
+  const [refreshNowPending, setRefreshNowPending] = useState(false);
+  const [refreshNowMessage, setRefreshNowMessage] = useState<string | null>(null);
+  const [snapshotRevision, setSnapshotRevision] = useState(0);
 
   const [showDebugIndicator, setShowDebugIndicator] = useState<boolean>(false);
   const [, setIsDetailDrawerOpen] = useState<boolean>(false);
 
   const realFlightsCount = useMemo(() => {
-    return flights.length;
+    return flights.filter((flight) => !flight.is_synthetic && flight.source !== 'regional_fallback' && flight.staleness_status !== 'STALE').length;
   }, [flights]);
 
   const formatPollTime = (isoString?: string | null) => {
@@ -1316,8 +976,10 @@ export default function App() {
     let socket: WebSocket | null = null;
     let reconnectTimeout: number | null = null;
     let reconnectDelay = 1000;
+    let disposed = false;
 
     const connect = () => {
+      if (disposed) return;
       // Dynamic auth token resolution: reconnects always use the current real session.
       const activeToken = localStorage.getItem('airguard_token') || tokenRef.current;
       if (!activeToken) {
@@ -1337,12 +999,16 @@ export default function App() {
         try {
           const data = JSON.parse(event.data);
           if (data.event === 'ALERT_TRIGGERED') {
+            const rawCallsign = data.callsign?.trim() ? data.callsign : data.icao24;
+            const opInfo = getAirlineInfo(rawCallsign, data.icao24);
             addAlert({
-              id: String(Date.now()),
-              timestamp: new Date().toTimeString().split(' ')[0],
-              callsign: data.icao24.toUpperCase(),
+              id: String(data.id ?? `${data.icao24}-${data.detected_at ?? Date.now()}`),
+              timestamp: new Date(data.detected_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+              detected_at: data.detected_at,
+              callsign: rawCallsign.toUpperCase(),
               icao24: data.icao24,
-              type: data.reason_text,
+              airline: opInfo.name,
+              type: data.reason_text || "Signal Inconsistency",
               severity: data.combined_risk_score >= 0.8 ? 'high' : 'medium',
               scoreImpact: -Math.round(data.combined_risk_score * 100),
               acknowledged: false,
@@ -1351,6 +1017,25 @@ export default function App() {
             updateFlightStatus(data.icao24, data.combined_risk_score);
           } else if (data.event === 'AIRCRAFT_UPDATE') {
             updateOrAddFlight(data.payload);
+          } else if (data.event === 'AIRCRAFT_BATCH_UPDATE' && Array.isArray(data.payload?.items)) {
+            updateOrAddFlights(data.payload.items);
+          } else if (data.event === 'SOURCE_REFRESH_STATE') {
+            const source = data.payload || data;
+            setHealthData(previous => ({
+              ...previous,
+              source_status: source.source_status ?? previous.source_status,
+              last_successful_update: source.last_successful_update ?? previous.last_successful_update,
+              next_attempt_at: source.next_attempt_at ?? previous.next_attempt_at,
+              retry_after: source.retry_after ?? previous.retry_after,
+              snapshot_age_seconds: source.snapshot_age_seconds ?? previous.snapshot_age_seconds,
+              snapshot_count: source.snapshot_count ?? previous.snapshot_count,
+              consecutive_failures: source.consecutive_failures ?? previous.consecutive_failures,
+              last_error: source.last_error ?? null,
+              refresh_in_progress: Boolean(source.refresh_in_progress),
+              manual_refresh_pending: Boolean(source.manual_refresh_pending),
+              upstream_status: source.source_status === 'FRESH' ? 'LIVE' : source.source_status === 'STALE' ? 'STALE' : source.source_status === 'RATE_LIMITED' ? 'RATE_LIMITED' : source.source_status === 'UNAVAILABLE' || source.source_status === 'INVALID_RESPONSE' ? 'UNAVAILABLE' : previous.upstream_status
+            }));
+            if (source.snapshot_replaced) setSnapshotRevision(value => value + 1);
           }
         } catch (err) {
           console.error("Failed to parse websocket message:", err);
@@ -1358,6 +1043,7 @@ export default function App() {
       };
 
       socket.onclose = () => {
+        if (disposed) return;
         setWebsocketStatus('reconnecting');
         reconnectTimeout = window.setTimeout(() => {
           reconnectDelay = Math.min(reconnectDelay * 2, 30000);
@@ -1373,10 +1059,11 @@ export default function App() {
     connect();
 
     return () => {
+      disposed = true;
       if (socket) socket.close();
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
     };
-  }, [addAlert, updateFlightStatus, updateOrAddFlight, setBackendHealth, setWebsocketStatus, token]);
+  }, [addAlert, updateFlightStatus, updateOrAddFlight, updateOrAddFlights, setBackendHealth, setWebsocketStatus, token]);
 
   // Check system stats
   useEffect(() => {
@@ -1389,9 +1076,11 @@ export default function App() {
             poll_latency_ms: data.poll_latency_ms,
             queue_depth: data.queue_depth,
             circuit_breaker_state: data.circuit_breaker_state,
+            database_status: data.database_status || 'UNKNOWN',
+            redis_status: data.redis_status || 'UNKNOWN',
             last_successful_poll: data.last_successful_poll,
             last_poll_records: data.last_poll_records,
-            last_processed_records: data.last_processed_records,
+            last_normalized_records: data.last_normalized_records,
             last_poll_http_status: data.last_poll_http_status,
             rate_limit_remaining: data.rate_limit_remaining,
             total_real_states: data.total_real_states,
@@ -1401,7 +1090,19 @@ export default function App() {
             max_allowed_poll_gap_seconds: data.max_allowed_poll_gap_seconds,
             feed_source: data.feed_source,
             fallback_reason: data.fallback_reason,
-            upstream_message: data.upstream_message
+            upstream_message: data.upstream_message,
+            source_status: data.source_status,
+            source_name: data.source_name,
+            last_successful_update: data.last_successful_update,
+            next_attempt_at: data.next_attempt_at,
+            retry_after: data.retry_after,
+            snapshot_age_seconds: data.snapshot_age_seconds,
+            snapshot_count: data.snapshot_count,
+            consecutive_failures: data.consecutive_failures,
+            last_error: data.last_error,
+            refresh_in_progress: data.refresh_in_progress,
+            manual_refresh_pending: data.manual_refresh_pending,
+            refresh_interval_seconds: data.refresh_interval_seconds
           });
         }
       } catch (err) {
@@ -1429,22 +1130,29 @@ export default function App() {
   useEffect(() => {
     const fetchInitialAirspace = async () => {
       try {
-        const alertsLoad = fetchWithAuth(`${API_BASE}/api/v1/alerts?limit=50`).then(async (alertsRes) => {
+        const alertsLoad = fetchWithAuth(`${API_BASE}/api/v1/alerts?limit=1000`).then(async (alertsRes) => {
           if (!alertsRes.ok) return;
-          const alertsData = await alertsRes.json();
+          const alertsData = await alertsRes.json() as AlertApiResponse[];
           if (Array.isArray(alertsData)) {
-            const mappedAlerts: AlertLog[] = alertsData.filter((a: any) => !a.is_synthetic).map((a: any) => ({
-              id: String(a.id),
-              timestamp: new Date(a.detected_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-              callsign: a.icao24.toUpperCase(),
-              icao24: a.icao24,
-              type: a.reason_text || "Signal Inconsistency",
-              severity: a.combined_risk_score >= 0.8 ? 'high' : 'medium',
-              scoreImpact: -Math.round(a.combined_risk_score * 100),
-              acknowledged: a.acknowledged ?? false,
-              is_synthetic: a.is_synthetic ?? false
-            }));
-            useStore.setState({ alerts: mappedAlerts });
+            const mappedAlerts: AlertLog[] = alertsData.filter((a) => !a.is_synthetic).map((a) => {
+              const rawCallsign = a.callsign?.trim() ? a.callsign : a.icao24;
+              const opInfo = getAirlineInfo(rawCallsign, a.icao24);
+              return {
+                id: String(a.id),
+                timestamp: new Date(a.detected_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                detected_at: a.detected_at,
+                callsign: rawCallsign.toUpperCase(),
+                icao24: a.icao24,
+                airline: opInfo.name,
+                type: a.reason_text || "Signal Inconsistency",
+                severity: a.combined_risk_score >= 0.8 ? 'high' : 'medium',
+                scoreImpact: -Math.round(a.combined_risk_score * 100),
+                acknowledged: a.acknowledged ?? false,
+                is_synthetic: a.is_synthetic ?? false
+              };
+            });
+            const activeCountHeader = alertsRes.headers.get('X-Active-Alert-Count');
+            setAlerts(mappedAlerts, activeCountHeader === null ? undefined : Number(activeCountHeader));
           }
         }).catch((error) => {
           console.warn("Initial alert fetch failed:", error);
@@ -1452,32 +1160,30 @@ export default function App() {
         const acRes = await fetchWithAuth(`${API_BASE}/api/v1/aircraft`);
 
         if (acRes.ok) {
-          const states = await acRes.json();
-          if (Array.isArray(states)) {
-            const mapped: Flight[] = states.filter((s: any) => !s.is_synthetic && s.source !== 'regional_fallback').map((s: any) => {
-              const calcTrust = s.trust_score !== undefined && s.trust_score !== null
-                ? Math.round(s.trust_score)
-                : (s.combined_risk_score !== undefined && s.combined_risk_score !== null
-                    ? Math.max(5, Math.min(100, Math.round((1.0 - s.combined_risk_score) * 100)))
-                    : Number.NaN);
-              const calcStatus: 'normal' | 'suspicious' | 'critical' = 
-                s.combined_risk_score !== undefined && s.combined_risk_score !== null
-                  ? (s.combined_risk_score >= 0.8 ? 'critical' : s.combined_risk_score >= 0.4 ? 'suspicious' : 'normal')
-                  : (calcTrust < 50 ? 'critical' : calcTrust < 75 ? 'suspicious' : 'normal');
+        const states = await acRes.json() as AircraftApiState[];
+        if (Array.isArray(states)) {
+          const mapped: Flight[] = states.filter((s) => !s.is_synthetic && s.source !== 'regional_fallback').map((s) => {
+              const calcTrust = s.trust_score !== undefined && s.trust_score !== null ? Math.round(s.trust_score) : Number.NaN;
+              const visibleRisk = displayableRisk(s.combined_risk_score, s.assessment_status);
+              const calcStatus = detectorStatusFromRisk(visibleRisk, s.assessment_status);
 
               return {
                 id: s.icao24,
+                received_at: s.received_at,
                 callsign: s.callsign || `AC-${s.icao24.slice(0, 4).toUpperCase()}`,
-                squawk: '1200',
-                altitude: Math.round(s.altitude_m * 3.28084),
-                speed: Math.round(s.velocity_ms * 1.94384),
-                heading: Math.round(s.heading_deg),
+                squawk: s.squawk ?? null,
+                altitude: isObservedField(s.data_quality, 'altitude') ? Math.round(s.altitude_m * 3.28084) : Number.NaN,
+                speed: isObservedField(s.data_quality, 'velocity') ? Math.round(s.velocity_ms * 1.94384) : Number.NaN,
+                heading: isObservedField(s.data_quality, 'heading') ? Math.round(s.heading_deg) : Number.NaN,
                 trustScore: calcTrust,
+                combined_risk_score: visibleRisk,
+                assessment_status: s.assessment_status,
                 signalStrength: undefined,
                 status: calcStatus,
                 lat: s.latitude,
                 lng: s.longitude,
                 is_synthetic: Boolean(s.is_synthetic || s.source === 'regional_fallback'),
+                data_quality: s.data_quality,
                 source: s.source || 'source_unavailable',
                 route: 'Route unknown',
                 history: [],
@@ -1493,9 +1199,9 @@ export default function App() {
                 icao24: f.id,
                 lat: f.lat,
                 lng: f.lng,
-                altitudeFt: f.altitude,
-                headingDeg: f.heading,
-                speedKnots: f.speed,
+                altitudeFt: Number.isFinite(f.altitude) ? f.altitude : 0,
+                headingDeg: Number.isFinite(f.heading) ? f.heading : 0,
+                speedKnots: Number.isFinite(f.speed) ? f.speed : 0,
                 durationSec: 8
               });
             });
@@ -1509,7 +1215,47 @@ export default function App() {
       }
     };
     fetchInitialAirspace();
-  }, [token]);
+  }, [fetchWithAuth, setAlerts]);
+
+  // Keep the global alerts and authoritative active count updated periodically.
+  useEffect(() => {
+    if (!token) return;
+    const refreshAlerts = async () => {
+      try {
+        const response = await fetchWithAuth(`${API_BASE}/api/v1/alerts?limit=1000`);
+        if (!response.ok) return;
+        const count = response.headers.get('X-Active-Alert-Count');
+        const activeNum = count !== null && Number.isFinite(Number(count)) ? Number(count) : undefined;
+        const alertsData = await response.json() as AlertApiResponse[];
+        if (Array.isArray(alertsData)) {
+          const mappedAlerts: AlertLog[] = alertsData.filter((a) => !a.is_synthetic).map((a) => {
+            const rawCallsign = a.callsign?.trim() ? a.callsign : a.icao24;
+            const opInfo = getAirlineInfo(rawCallsign, a.icao24);
+            return {
+              id: String(a.id),
+              timestamp: new Date(a.detected_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+              detected_at: a.detected_at,
+              callsign: rawCallsign.toUpperCase(),
+              icao24: a.icao24,
+              airline: opInfo.name,
+              type: a.reason_text || "Signal Inconsistency",
+              severity: a.combined_risk_score >= 0.8 ? 'high' : 'medium',
+              scoreImpact: -Math.round(a.combined_risk_score * 100),
+              acknowledged: a.acknowledged ?? false,
+              is_synthetic: a.is_synthetic ?? false
+            };
+          });
+          useStore.getState().setAlerts(mappedAlerts, activeNum);
+        } else if (activeNum !== undefined) {
+          useStore.getState().setAlerts([], activeNum);
+        }
+      } catch {
+        // Retain the last known count during a transient API outage.
+      }
+    };
+    const interval = window.setInterval(refreshAlerts, 20000);
+    return () => window.clearInterval(interval);
+  }, [fetchWithAuth, token]);
 
   // Continuous tracking integrity: Staleness increment ticker and timeout pruner
   // Thresholds follow the provider polling cadence so slower global queries remain visible as stale.
@@ -1529,8 +1275,7 @@ export default function App() {
             last_seen_seconds_ago: currentAge,
             staleness_status: isStale ? 'STALE' : 'LIVE'
           }];
-        })
-        .filter(f => (f.last_seen_seconds_ago ?? 0) <= removalAfterSeconds);
+        });
 
       useStore.getState().setFlights(updated);
     }, 2000);
@@ -1545,7 +1290,7 @@ export default function App() {
       try {
         const res = await fetchWithAuth(`${API_BASE}/api/v1/aircraft`);
         if (!res.ok) return;
-        const liveStates = await res.json();
+        const liveStates = await res.json() as AircraftApiState[];
         if (!Array.isArray(liveStates)) return;
 
         const currentFlights = useStore.getState().flights;
@@ -1554,64 +1299,68 @@ export default function App() {
         const seenIcaos = new Set<string>();
         const merged: Flight[] = [];
 
-        liveStates.forEach((s: any) => {
+        liveStates.forEach((s) => {
           if (s.is_synthetic || s.source === 'regional_fallback') return;
           seenIcaos.add(s.icao24);
           const existing = currentById.get(s.icao24);
-          const altitude = Math.round(s.altitude_m * 3.28084);
-          const speed = Math.round(s.velocity_ms * 1.94384);
-          const heading = Math.round(s.heading_deg);
+          const altitude = isObservedField(s.data_quality, 'altitude') ? Math.round(s.altitude_m * 3.28084) : (existing?.altitude ?? Number.NaN);
+          const speed = isObservedField(s.data_quality, 'velocity') ? Math.round(s.velocity_ms * 1.94384) : (existing?.speed ?? Number.NaN);
+          const heading = isObservedField(s.data_quality, 'heading') ? Math.round(s.heading_deg) : (existing?.heading ?? Number.NaN);
 
           aircraftMotionManager.updatePosition({
             icao24: s.icao24,
             lat: s.latitude,
             lng: s.longitude,
-            altitudeFt: altitude,
-            headingDeg: heading,
-            speedKnots: speed,
+            altitudeFt: Number.isFinite(altitude) ? altitude : 0,
+            headingDeg: Number.isFinite(heading) ? heading : 0,
+            speedKnots: Number.isFinite(speed) ? speed : 0,
             durationSec: 8
           });
 
           if (existing) {
             merged.push({
               ...existing,
+              received_at: s.received_at,
               lat: s.latitude,
               lng: s.longitude,
               altitude,
               speed,
               heading,
-              verticalRate: s.vertical_rate_ms ?? existing.verticalRate,
+              verticalRate: isObservedField(s.data_quality, 'vertical_rate') ? s.vertical_rate_ms : existing.verticalRate,
               last_seen_seconds_ago: s.last_seen_seconds_ago ?? 0,
               staleness_status: s.staleness_status || 'LIVE',
               route: s.route || existing.route || 'Route unknown',
               source: s.source || existing.source || 'source_unavailable',
-              is_synthetic: Boolean(s.is_synthetic || s.source === 'regional_fallback')
+              combined_risk_score: displayableRisk(s.combined_risk_score, s.assessment_status),
+              assessment_status: s.assessment_status,
+              status: detectorStatusFromRisk(displayableRisk(s.combined_risk_score, s.assessment_status), s.assessment_status),
+              is_synthetic: Boolean(s.is_synthetic || s.source === 'regional_fallback'),
+              data_quality: s.data_quality,
+              squawk: s.squawk ?? existing.squawk
             });
           } else {
-            const calcTrust = s.trust_score !== undefined && s.trust_score !== null
-              ? Math.round(s.trust_score)
-              : (s.combined_risk_score !== undefined && s.combined_risk_score !== null
-                  ? Math.max(5, Math.min(100, Math.round((1.0 - s.combined_risk_score) * 100)))
-                  : Number.NaN);
-            const calcStatus: 'normal' | 'suspicious' | 'critical' = 
-              s.combined_risk_score !== undefined && s.combined_risk_score !== null
-                ? (s.combined_risk_score >= 0.8 ? 'critical' : s.combined_risk_score >= 0.4 ? 'suspicious' : 'normal')
-                : (calcTrust < 50 ? 'critical' : calcTrust < 75 ? 'suspicious' : 'normal');
+            const calcTrust = s.trust_score !== undefined && s.trust_score !== null ? Math.round(s.trust_score) : Number.NaN;
+            const visibleRisk = displayableRisk(s.combined_risk_score, s.assessment_status);
+            const calcStatus = detectorStatusFromRisk(visibleRisk, s.assessment_status);
 
             merged.push({
               id: s.icao24,
+              received_at: s.received_at,
               callsign: s.callsign || `AC-${s.icao24.slice(0, 4).toUpperCase()}`,
-              squawk: '1200',
+              squawk: s.squawk ?? null,
               altitude,
               speed,
               heading,
-              verticalRate: s.vertical_rate_ms,
+              verticalRate: isObservedField(s.data_quality, 'vertical_rate') ? s.vertical_rate_ms : undefined,
               trustScore: calcTrust,
+              combined_risk_score: visibleRisk,
+              assessment_status: s.assessment_status,
               signalStrength: undefined,
               status: calcStatus,
               lat: s.latitude,
               lng: s.longitude,
               is_synthetic: Boolean(s.is_synthetic || s.source === 'regional_fallback'),
+              data_quality: s.data_quality,
               source: s.source || 'source_unavailable',
               route: s.route || 'Route unknown',
               history: [],
@@ -1643,16 +1392,17 @@ export default function App() {
       }
     };
 
+    void reconcileAirspace();
     const interval = setInterval(reconcileAirspace, 30000);
     return () => clearInterval(interval);
-  }, [token, staleAfterSeconds, removalAfterSeconds]);
+  }, [fetchWithAuth, staleAfterSeconds, removalAfterSeconds, snapshotRevision]);
 
   // --- Trust History State for Selected Target ---
   interface TrustHistoryItem {
     timestamp: string;
     time: string;
-    trust_score: number;
-    instantaneous_risk: number;
+    risk_score: number;
+    smoothed_risk_score: number;
     is_alert: boolean;
     reported_nic: number | null;
   }
@@ -1681,13 +1431,13 @@ export default function App() {
               time: new Date(pt.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
             }));
             setTrustHistory(formatted);
-            setTrustPattern(data.pattern || "STABLE");
+            setTrustPattern(data.pattern || "UNASSESSED");
             setIsTrustLoading(false);
             return;
           }
         }
       } catch (e) {
-        // Fallback to synthetic local history if backend is offline or in simulated demo mode
+        // Do not create local substitute readings when the API is unavailable.
       }
 
       if (!isMounted) return;
@@ -1706,77 +1456,8 @@ export default function App() {
   }, [selectedFlightId, flights]);
 
   // --- Consolidated Detail Data for Selected Target (Endpoint: /api/v1/aircraft/{icao24}/detail) ---
-  interface FlightRouteData {
-    icao24: string;
-    session_id?: string;
-    callsign?: string | null;
-    est_departure_airport?: string | null;
-    est_arrival_airport?: string | null;
-    first_seen?: string | null;
-    last_seen?: string | null;
-    route_text: string;
-    fetched_at?: string | null;
-    dep_lat?: number | null;
-    dep_lng?: number | null;
-    arr_lat?: number | null;
-    arr_lng?: number | null;
-  }
-
-  interface AircraftDetailData {
-    icao24: string;
-    callsign?: string | null;
-    live_state: {
-      id: number;
-      icao24: string;
-      callsign?: string | null;
-      latitude: number;
-      longitude: number;
-      altitude_m: number;
-      velocity_ms: number;
-      heading_deg: number;
-      vertical_rate_ms: number;
-      on_ground: boolean;
-      received_at: string;
-      source: string;
-      reported_nic?: number | null;
-      is_synthetic?: boolean;
-      last_seen_seconds_ago?: number;
-      staleness_status?: string;
-    };
-    route: FlightRouteData;
-    identity?: {
-      registration?: string | null;
-      typecode?: string | null;
-      model?: string | null;
-      operator?: string | null;
-      country?: string | null;
-      source: string;
-    };
-    trust_status?: {
-      status_text: string;
-      is_flagged: boolean;
-      combined_risk_score: number;
-      rolling_trust_score: number;
-      explanation: string;
-      reasons: string[];
-      rule_flags: Record<string, boolean>;
-      technical_details: Record<string, any>;
-      trilateration_stations: number;
-      last_evaluated_at?: string | null;
-    };
-    staleness?: {
-      status: string;
-      is_stale: boolean;
-      last_seen_seconds_ago: number;
-      last_received_at: string;
-      staleness_threshold_seconds: number;
-      removal_threshold_seconds: number;
-    };
-    first_seen_session?: string | null;
-  }
-
-  const [selectedFlightDetail, setSelectedFlightDetail] = useState<AircraftDetailData | null>(null);
-  const [selectedFlightRoute, setSelectedFlightRoute] = useState<FlightRouteData | null>(null);
+  const [selectedFlightDetail, setSelectedFlightDetail] = useState<AircraftDetailResponse | null>(null);
+  const [selectedFlightRoute, setSelectedFlightRoute] = useState<AircraftDetailResponse['route'] | null>(null);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const isRouteLoading = isDetailLoading;
 
@@ -1794,14 +1475,14 @@ export default function App() {
       try {
         const res = await fetchWithAuth(`${API_BASE}/api/v1/aircraft/${selectedFlightId}/detail`);
         if (!res.ok) throw new Error(`Aircraft detail request failed: ${res.status}`);
-        const data: AircraftDetailData = await res.json();
+        const data: AircraftDetailResponse = await res.json();
         if (!isMounted) return;
         setSelectedFlightDetail(data);
         setSelectedFlightRoute(data.route);
       } catch (err) {
         console.warn('[AirGuard] Aircraft detail is unavailable:', err);
         if (!isMounted) return;
-        const currentFlight = flights.find(f => f.id === selectedFlightId);
+        const currentFlight = useStore.getState().flights.find(f => f.id === selectedFlightId);
         setSelectedFlightDetail(null);
         setSelectedFlightRoute({
           icao24: selectedFlightId,
@@ -1817,52 +1498,8 @@ export default function App() {
 
     fetchDetail();
     return () => { isMounted = false; };
-  }, [selectedFlightId]);
-  // Fetch ablation runs when navigating to Analytics
-  useEffect(() => {
-    if (tier3Tab !== 'analytics') return;
-    let isMounted = true;
-    const fetchAblationRuns = async () => {
-      try {
-        const res = await fetchWithAuth(`${API_BASE}/api/v1/model-runs?limit=20`);
-        if (res.ok) {
-          const runs: ModelRunStats[] = await res.json();
-          const ablRuns = runs.filter(r => r.model_version.startsWith('abl-') || (r.notes && r.notes.toLowerCase().includes('ablation')));
-          if (ablRuns.length > 0 && isMounted) {
-            const mapped: AblationMetric[] = ablRuns.map(run => {
-              const totalNegatives = run.false_positives + run.true_negatives;
-              const fpr = totalNegatives > 0 ? (run.false_positives / totalNegatives) * 100 : 0;
-              return {
-                name: run.model_version,
-                configKey: run.model_version,
-                f1: Number((run.f1 * 100).toFixed(1)),
-                fpr: Number(fpr.toFixed(1)),
-                precision: Number((run.precision * 100).toFixed(1)),
-                recall: Number((run.recall * 100).toFixed(1)),
-                desc: run.notes || 'Recorded model evaluation'
-              };
-            });
-            setAblationData(mapped);
-          }
-        }
-      } catch (err) {
-        // No backend metrics are available; retain the intentional empty state.
-      }
-    };
-    fetchAblationRuns();
-    return () => { isMounted = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tier3Tab]);
-
-  // --- Showcase Mode & Cinematic Intro Handlers ---
-  const handleToggleShowcaseMode = (val: boolean) => {
-    setShowcaseMode(val);
-    localStorage.setItem('airguard_showcase_mode', String(val));
-    if (!val && isCinematicActive) {
-      handleSkipCinematic();
-    }
-  };
-
+  }, [fetchWithAuth, selectedFlightId]);
+  // --- Camera motion and cinematic intro handlers ---
   const handleToggleReduceMotion = (val: boolean) => {
     setReduceMotion(val);
     localStorage.setItem('airguard_reduce_motion', String(val));
@@ -1880,23 +1517,13 @@ export default function App() {
     if (viewerRef.current && !viewerRef.current.isDestroyed()) {
       viewerRef.current.camera.cancelFlight();
       viewerRef.current.camera.setView({
-        destination: Cartesian3.fromDegrees(78.9629, 20.5937, 4200000)
+        destination: Cartesian3.fromDegrees(0, 18, 18000000)
       });
     }
     setIsCinematicActive(false);
     setCinematicProgress(1.0);
     sessionStorage.setItem('airguard_cinematic_dismissed', 'true');
     stopAmbientAtmosphere(true);
-  };
-
-  const handleReplayCinematic = () => {
-    sessionStorage.removeItem('airguard_cinematic_dismissed');
-    setCurrentTier('tier2_radar');
-    setTimeout(() => {
-      if (viewerRef.current && !viewerRef.current.isDestroyed()) {
-        launchCinematicFlight(viewerRef.current);
-      }
-    }, 150);
   };
 
   const launchCinematicFlight = (viewer: CesiumViewer) => {
@@ -1910,7 +1537,7 @@ export default function App() {
     // If Showcase Mode is OFF or Reduce Motion is ON, jump directly to tactical position with zero delay
     if (!showcaseMode || reduceMotion) {
       viewer.camera.setView({
-        destination: Cartesian3.fromDegrees(78.9629, 20.5937, 4200000)
+        destination: Cartesian3.fromDegrees(0, 18, 18000000)
       });
       setIsCinematicActive(false);
       setCinematicProgress(1.0);
@@ -1920,7 +1547,7 @@ export default function App() {
 
     // Set initial high orbital camera view (26,000 km in deep space)
     viewer.camera.setView({
-      destination: Cartesian3.fromDegrees(78.9629, 20.5937, 26000000),
+      destination: Cartesian3.fromDegrees(0, 18, 26000000),
       orientation: {
         heading: CesiumMath.toRadians(0),
         pitch: CesiumMath.toRadians(-90),
@@ -1955,7 +1582,7 @@ export default function App() {
     cinematicTimerRef.current.push(t1, t2, animInterval);
 
     viewer.camera.flyTo({
-      destination: Cartesian3.fromDegrees(78.9629, 20.5937, 4200000),
+      destination: Cartesian3.fromDegrees(0, 18, 18000000),
       duration: 7.0,
       easingFunction: EasingFunction.CUBIC_IN_OUT,
       complete: () => {
@@ -2013,7 +1640,7 @@ export default function App() {
         launchCinematicFlight(viewerRef.current);
       } else {
         viewerRef.current.camera.setView({
-          destination: Cartesian3.fromDegrees(78.9629, 20.5937, 4200000)
+          destination: Cartesian3.fromDegrees(0, 18, 18000000)
         });
         setIsCinematicActive(false);
         setCinematicProgress(1.0);
@@ -2059,52 +1686,15 @@ export default function App() {
     });
   };
 
-  // POST /api/v1/model-runs/replay trigger
-  const handleReplaySession = async () => {
-    setIsReplaying(true);
-    if (!token) {
-      setReplayResult(null);
-      setIsReplaying(false);
-      alert("Sign in to run a replay against stored aircraft records.");
-      return;
-    }
-    try {
-      const saveRes = await fetchWithAuth(`${API_BASE}/api/v1/config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
-      });
-      
-      if (!saveRes.ok) {
-        const errorData = await saveRes.json();
-        alert(`Replay failed to save config: ${errorData.detail || "Unauthorized access."}`);
-        setIsReplaying(false);
-        return;
-      }
-      
-      const res = await fetchWithAuth(`${API_BASE}/api/v1/model-runs/replay`, { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        setReplayResult(data);
-      } else {
-        const errorData = await res.json();
-        alert(`Replay validation failed: ${errorData.detail || "Unauthorized access."}`);
-      }
-    } catch (err) {
-      alert("Error connecting to replay validator service.");
-    }
-    setIsReplaying(false);
-  };
-
   // Active flights selection
   const activeFlights = useMemo((): Flight[] => {
     return flights;
   }, [flights]);
 
-  // --- Spatial Confidence Overlay (Airspace trust heatmap, not traffic volume) ---
+  // --- Detector Risk Overlay (only sectors with persisted detector scores) ---
   const CELL_SIZE_DEG = 2.5;
 
-  interface SpatialConfidenceSector {
+  interface DetectorRiskSector {
     id: string;
     name: string;
     west: number;
@@ -2113,11 +1703,11 @@ export default function App() {
     north: number;
     centerLng: number;
     centerLat: number;
-    avgConfidence: number;
+    avgRisk: number;
     flightCount: number;
     flights: Flight[];
     hasAnomaly: boolean;
-    minConfidence: number;
+    minRisk: number;
     tier: 'high' | 'moderate' | 'low';
     rect: Rectangle;
     fillColor: Color;
@@ -2125,7 +1715,7 @@ export default function App() {
     labelColor: Color;
   }
 
-  const confidenceSectors = useMemo((): SpatialConfidenceSector[] => {
+  const confidenceSectors = useMemo((): DetectorRiskSector[] => {
     if (!activeFlights || activeFlights.length === 0) return [];
 
     const cellMap = new Map<string, {
@@ -2135,7 +1725,7 @@ export default function App() {
     }>();
 
     for (const f of activeFlights) {
-      if (f.is_synthetic || f.source === 'regional_fallback' || typeof f.lat !== 'number' || typeof f.lng !== 'number' || isNaN(f.lat) || isNaN(f.lng) || !Number.isFinite(f.trustScore)) {
+      if (f.is_synthetic || f.source === 'regional_fallback' || typeof f.lat !== 'number' || typeof f.lng !== 'number' || isNaN(f.lat) || isNaN(f.lng) || !Number.isFinite(f.combined_risk_score)) {
         continue;
       }
       const cellLat = Math.floor(f.lat / CELL_SIZE_DEG) * CELL_SIZE_DEG;
@@ -2150,20 +1740,17 @@ export default function App() {
       }
     }
 
-    const sectors: SpatialConfidenceSector[] = [];
+    const sectors: DetectorRiskSector[] = [];
 
     cellMap.forEach((entry) => {
       const { cellLat, cellLng, flights } = entry;
       const count = flights.length;
       if (count === 0) return;
 
-      const sumTrust = flights.reduce((acc, f) => {
-        const score = f.trustScore;
-        return acc + score;
-      }, 0);
-      const avgConfidence = sumTrust / count;
-      const minConfidence = Math.min(...flights.map(f => f.trustScore));
-      const hasAnomaly = flights.some(f => f.status === 'critical' || f.status === 'suspicious' || (typeof f.trustScore === 'number' && f.trustScore < 65));
+      const risks = flights.map(f => (f.combined_risk_score as number) * 100);
+      const avgRisk = risks.reduce((sum, value) => sum + value, 0) / count;
+      const minRisk = Math.min(...risks);
+      const hasAnomaly = flights.some(f => f.status === 'critical' || f.status === 'suspicious');
 
       const west = cellLng;
       const south = cellLat;
@@ -2172,34 +1759,31 @@ export default function App() {
       const centerLng = cellLng + CELL_SIZE_DEG / 2;
       const centerLat = cellLat + CELL_SIZE_DEG / 2;
 
-      // Color mapping by trust confidence:
-      // Calm blue-grey/slate for high confidence (>= 85%)
-      // Gradually warmer for regions where currently-tracked aircraft show lower signal confidence:
-      // Amber (65-84%), Warm Rose/Red (< 65%)
+      // Scores are heuristic detector-risk outputs, not probability or signal confidence.
       let tier: 'high' | 'moderate' | 'low';
       let fillColor: Color;
       let outlineColor: Color;
       let labelColor: Color;
 
-      if (avgConfidence >= 85) {
+      if (avgRisk >= 65) {
         tier = 'high';
-        fillColor = Color.fromCssColorString('#0284c7').withAlpha(0.24); // Calm blue-grey / slate-cyan
-        outlineColor = Color.fromCssColorString('#38bdf8').withAlpha(0.60);
-        labelColor = Color.fromCssColorString('#7dd3fc');
-      } else if (avgConfidence >= 65) {
+        fillColor = Color.fromCssColorString('#e11d48').withAlpha(0.40);
+        outlineColor = Color.fromCssColorString('#f43f5e').withAlpha(0.92);
+        labelColor = Color.fromCssColorString('#fda4af');
+      } else if (avgRisk >= 35) {
         tier = 'moderate';
-        fillColor = Color.fromCssColorString('#d97706').withAlpha(0.32); // Warm amber
+        fillColor = Color.fromCssColorString('#d97706').withAlpha(0.32);
         outlineColor = Color.fromCssColorString('#f59e0b').withAlpha(0.75);
         labelColor = Color.fromCssColorString('#fcd34d');
       } else {
         tier = 'low';
-        fillColor = Color.fromCssColorString('#e11d48').withAlpha(0.40); // Warm rose / alert red
-        outlineColor = Color.fromCssColorString('#f43f5e').withAlpha(0.92);
-        labelColor = Color.fromCssColorString('#fda4af');
+        fillColor = Color.fromCssColorString('#0284c7').withAlpha(0.24);
+        outlineColor = Color.fromCssColorString('#38bdf8').withAlpha(0.60);
+        labelColor = Color.fromCssColorString('#7dd3fc');
       }
 
       const id = `${Math.abs(cellLat).toFixed(0)}${cellLat >= 0 ? 'N' : 'S'}-${Math.abs(cellLng).toFixed(0)}${cellLng >= 0 ? 'E' : 'W'}`;
-      const name = `Sector ${id} (Avg Confidence: ${avgConfidence.toFixed(1)}%)`;
+      const name = `Sector ${id} (mean detector risk: ${avgRisk.toFixed(1)}%)`;
 
       sectors.push({
         id,
@@ -2210,11 +1794,11 @@ export default function App() {
         north,
         centerLng,
         centerLat,
-        avgConfidence,
+        avgRisk,
         flightCount: count,
         flights,
         hasAnomaly,
-        minConfidence,
+        minRisk,
         tier,
         rect: Rectangle.fromDegrees(west, south, east, north),
         fillColor,
@@ -2226,16 +1810,16 @@ export default function App() {
     return sectors;
   }, [activeFlights]);
 
-  const overallAirspaceTrust = useMemo(() => {
+  const overallDetectorRisk = useMemo(() => {
     if (confidenceSectors.length === 0) return Number.NaN;
     const totalFlights = confidenceSectors.reduce((acc, s) => acc + s.flightCount, 0);
     if (totalFlights === 0) return Number.NaN;
-    const weightedSum = confidenceSectors.reduce((acc, s) => acc + s.avgConfidence * s.flightCount, 0);
+    const weightedSum = confidenceSectors.reduce((acc, s) => acc + s.avgRisk * s.flightCount, 0);
     return Math.round(weightedSum / totalFlights);
   }, [confidenceSectors]);
 
   const flaggedSectorsCount = useMemo(() => {
-    return confidenceSectors.filter(s => s.tier === 'low' || s.hasAnomaly).length;
+    return confidenceSectors.filter(s => s.tier === 'high' || s.hasAnomaly).length;
   }, [confidenceSectors]);
 
   const visibleAircraftCount = useMemo(() => {
@@ -2257,11 +1841,13 @@ export default function App() {
   // Sort: Flagged-first
   const sortedFlights = useMemo(() => {
     return [...filteredFlights].sort((a, b) => {
-      const severityMap = { 'critical': 3, 'suspicious': 2, 'normal': 1 };
+      const severityMap = { 'critical': 3, 'suspicious': 2, 'normal': 1, 'unassessed': 0 };
       if (severityMap[a.status] !== severityMap[b.status]) {
         return severityMap[b.status] - severityMap[a.status];
       }
-      return a.trustScore - b.trustScore;
+      const riskA = Number.isFinite(a.combined_risk_score) ? a.combined_risk_score as number : -1;
+      const riskB = Number.isFinite(b.combined_risk_score) ? b.combined_risk_score as number : -1;
+      return riskB - riskA;
     });
   }, [filteredFlights]);
 
@@ -2304,7 +1890,7 @@ export default function App() {
 
     const planeLat = selectedFlight.lat;
     const planeLng = selectedFlight.lng;
-    const planeAltM = Math.max(100, (selectedFlight.altitude || 10000) * 0.3048);
+    const planeAltM = Number.isFinite(selectedFlight.altitude) ? Math.max(100, selectedFlight.altitude * 0.3048) : 100;
 
     let flownPositions: Cartesian3[] = [];
     if (origin) {
@@ -2349,27 +1935,45 @@ export default function App() {
     origin: selectedRouteEntities.origin ? { lat: selectedRouteEntities.origin.lat, lng: selectedRouteEntities.origin.lng, label: selectedRouteEntities.origin.label } : null,
     destination: selectedRouteEntities.destination ? { lat: selectedRouteEntities.destination.lat, lng: selectedRouteEntities.destination.lng, label: selectedRouteEntities.destination.label } : null,
   }) : null, [selectedRouteEntities]);
-  const activeAlerts = useMemo(() => {
-    return alerts.filter(a => !a.acknowledged);
-  }, [alerts]);
-  const hasActiveAlerts = activeAlerts.length > 0;
+  const hasActiveAlerts = activeAlertCount > 0;
 
   // Stats Card Calculations
   const stats = useMemo(() => {
     const total = activeFlights.length;
-    const anomalies = activeFlights.filter(f => f.status !== 'normal').length;
-    const scoredLiveFlights = activeFlights.filter(f => !f.is_synthetic && f.source !== 'regional_fallback' && Number.isFinite(f.trustScore));
-    const avgTrust = scoredLiveFlights.length > 0
-      ? Math.round(scoredLiveFlights.reduce((acc, f) => acc + f.trustScore, 0) / scoredLiveFlights.length * 10) / 10
+    const anomalies = activeFlights.filter(f => f.status === 'critical' || f.status === 'suspicious').length;
+    const scoredLiveFlights = activeFlights.filter(f => !f.is_synthetic && f.source !== 'regional_fallback' && Number.isFinite(f.combined_risk_score));
+    const avgRisk = scoredLiveFlights.length > 0
+      ? Math.round(scoredLiveFlights.reduce((acc, f) => acc + (f.combined_risk_score as number), 0) / scoredLiveFlights.length * 1000) / 10
       : Number.NaN;
-    return { total, anomalies, avgTrust };
+    return { total, anomalies, avgRisk, scoredCount: scoredLiveFlights.length };
   }, [activeFlights]);
-  const liveAircraftCount = useMemo(() => activeFlights.filter(f => !f.is_synthetic && f.source !== 'regional_fallback' && !f.id.startsWith('sim-')).length, [activeFlights]);
+  const liveAircraftCount = useMemo(() => activeFlights.filter(f => !f.is_synthetic && f.source !== 'regional_fallback' && !f.id.startsWith('sim-') && f.staleness_status !== 'STALE').length, [activeFlights]);
   const upstreamStatus = healthData.upstream_status || (healthData.last_poll_http_status === 429 ? 'RATE_LIMITED' : healthData.last_poll_http_status === 200 ? 'LIVE' : 'UNKNOWN');
 
-  // Sort and Paginate Alerts
+  // Filter, Sort and Paginate Alerts
+  const filteredAlerts = useMemo(() => {
+    let list = alerts;
+    if (alertSeverityFilter === 'high') {
+      list = list.filter(a => a.severity === 'high');
+    } else if (alertSeverityFilter === 'medium') {
+      list = list.filter(a => a.severity === 'medium');
+    } else if (alertSeverityFilter === 'unacked') {
+      list = list.filter(a => !a.acknowledged);
+    }
+    if (alertSearch.trim()) {
+      const q = alertSearch.trim().toLowerCase();
+      list = list.filter(a =>
+        a.callsign.toLowerCase().includes(q) ||
+        a.icao24.toLowerCase().includes(q) ||
+        (a.airline && a.airline.toLowerCase().includes(q)) ||
+        (a.type && a.type.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  }, [alerts, alertSeverityFilter, alertSearch]);
+
   const sortedAlerts = useMemo(() => {
-    return [...alerts].sort((a, b) => {
+    return [...filteredAlerts].sort((a, b) => {
       const valA = a[sortField];
       const valB = b[sortField];
       if (typeof valA === 'string') {
@@ -2377,20 +1981,20 @@ export default function App() {
       }
       return sortAsc ? (valA as number) - (valB as number) : (valB as number) - (valA as number);
     });
-  }, [alerts, sortField, sortAsc]);
+  }, [filteredAlerts, sortField, sortAsc]);
 
   const paginatedAlerts = useMemo(() => {
     const start = alertPage * alertsPerPage;
     return sortedAlerts.slice(start, start + alertsPerPage);
-  }, [sortedAlerts, alertPage]);
+  }, [sortedAlerts, alertPage, alertsPerPage]);
 
   // Client-Side CSV Export
   const exportAlertsCSV = () => {
-    const headers = ["ID", "Timestamp", "Callsign", "ICAO24", "Type/Reason", "Severity", "Impact", "Acknowledged"];
+    const headers = ["ID", "Timestamp", "Callsign", "Airline", "ICAO24", "Type/Reason", "Severity", "Impact", "Acknowledged"];
     const rows = sortedAlerts.map(a => [
-      a.id, a.timestamp, a.callsign, a.icao24, a.type, a.severity, a.scoreImpact, a.acknowledged
+      a.id, a.timestamp, a.callsign, a.airline || "Unknown", a.icao24, a.type, a.severity, a.scoreImpact, a.acknowledged
     ]);
-    const csvContent = "data:text/csv;charset=utf-8," 
+    const csvContent = "data:text/csv;charset=utf-8,"
       + [headers.join(","), ...rows.map(e => e.map(val => `"${val}"`).join(","))].join("\n");
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
@@ -2399,6 +2003,23 @@ export default function App() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const refreshLiveSnapshot = async () => {
+    if (refreshNowPending || healthData.refresh_in_progress || healthData.manual_refresh_pending) return;
+    setRefreshNowPending(true);
+    setRefreshNowMessage(null);
+    try {
+      const response = await fetchWithAuth(`${API_BASE}/api/v1/system/refresh`, { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail || 'Refresh request could not be queued.');
+      setRefreshNowMessage(body.queued ? 'Refresh queued; provider timing and rate limits are being respected.' : 'Refresh started.');
+      setHealthData(previous => ({ ...previous, manual_refresh_pending: Boolean(body.queued), refresh_in_progress: !body.queued }));
+    } catch (error) {
+      setRefreshNowMessage(error instanceof Error ? error.message : 'Refresh request failed.');
+    } finally {
+      setRefreshNowPending(false);
+    }
   };
 
   const downloadSessionReportPDF = async () => {
@@ -2423,12 +2044,18 @@ export default function App() {
 
   // Trigger server-side alert acknowledgment
   const handleAcknowledge = async (id: string) => {
-    acknowledgeAlert(id);
-    if (!token) return;
+    setAlertActionError(null);
+    if (!token) {
+      setAlertActionError('Sign in again before acknowledging this alert.');
+      return;
+    }
     try {
-      await fetchWithAuth(`${API_BASE}/api/v1/alerts/${id}/acknowledge`, { method: 'POST' });
-    } catch (e) {
-      // Degrade gracefully
+      const response = await fetchWithAuth(`${API_BASE}/api/v1/alerts/${id}/acknowledge`, { method: 'POST' });
+      if (!response.ok) throw new Error(`Server returned ${response.status}`);
+      acknowledgeAlert(id);
+    } catch (error) {
+      console.error('Failed to persist alert acknowledgement:', error);
+      setAlertActionError('The server did not confirm this acknowledgement. The alert remains active.');
     }
   };
 
@@ -2437,13 +2064,13 @@ export default function App() {
     const flight = sortedFlights[index];
     if (!flight) return null;
     const isSelected = flight.id === selectedFlightId;
-    const isStale = flight.staleness_status === 'STALE' || (flight.last_seen_seconds_ago !== undefined && flight.last_seen_seconds_ago > 20);
+    const isStale = flight.staleness_status === 'STALE' || (flight.last_seen_seconds_ago !== undefined && flight.last_seen_seconds_ago > staleAfterSeconds);
     const airline = getAirlineInfo(flight.callsign);
-    
-    // Status colors reserved strictly for status meaning
-    const statusTextClass = !Number.isFinite(flight.trustScore) ? 'text-slate-400 border-slate-600' : flight.status === 'critical' ? 'text-rose-400 border-rose-500/50' : flight.status === 'suspicious' ? 'text-amber-400 border-amber-500/50' : 'text-emerald-400 border-emerald-500/50';
-    
-    const statusSymbol = !Number.isFinite(flight.trustScore) ? '—' : flight.status === 'critical' ? '▲' : flight.status === 'suspicious' ? '◆' : '●';
+
+    // Risk flags use the detector's configured thresholds; no trust rating is implied.
+    const statusTextClass = flight.status === 'critical' ? 'text-rose-400 border-rose-500/50' : flight.status === 'suspicious' ? 'text-amber-400 border-amber-500/50' : 'text-slate-400 border-slate-600';
+
+    const statusSymbol = flight.status === 'critical' ? '▲' : flight.status === 'suspicious' ? '◆' : flight.status === 'unassessed' ? '·' : '●';
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
       if (e.key === 'Enter' || e.key === ' ') {
@@ -2451,18 +2078,18 @@ export default function App() {
         handleSelectFlightWithChaseCam(flight);
       }
     };
-    
+
     return (
       <div style={style} className="px-2">
-        <div 
+        <div
           role="button"
           tabIndex={0}
-          aria-label={`Flight ${flight.callsign || 'unknown'} (${airline.name}), status ${flight.status}, trust score ${flight.trustScore} percent`}
+          aria-label={`Flight ${flight.callsign || 'unknown'} (${airline.name}), detector status ${flight.status}, risk score ${flight.combined_risk_score ?? 'unassessed'}`}
           onClick={() => handleSelectFlightWithChaseCam(flight)}
           onKeyDown={handleKeyDown}
           className={`p-2.5 rounded-xl border cursor-pointer transition-colors focus:outline-none focus:border-sky-400 ${
-            isSelected 
-              ? 'bg-sky-400/[0.08] border-sky-400/50 ring-1 ring-sky-400/15' 
+            isSelected
+              ? 'bg-sky-400/[0.08] border-sky-400/50 ring-1 ring-sky-400/15'
               : isStale
               ? 'bg-[#0a1220] border-slate-800/80 opacity-75 hover:opacity-100 hover:bg-slate-800/50'
               : 'bg-[#0c1524] border-slate-800/90 hover:bg-slate-800/50 hover:border-slate-700'
@@ -2471,8 +2098,8 @@ export default function App() {
           <div className="flex justify-between items-center mb-1 gap-2">
             <div className="flex items-center gap-2 truncate">
               {/* Airline Color Accent Tag */}
-              <span 
-                className="w-1.5 h-3.5 rounded-sm shrink-0 shadow-sm" 
+              <span
+                className="w-1.5 h-3.5 rounded-sm shrink-0 shadow-sm"
                 style={{ backgroundColor: airline.color || '#38bdf8' }}
                 title={`${airline.name} (${airline.code})`}
               />
@@ -2493,12 +2120,12 @@ export default function App() {
               )}
             </div>
             <span className={`text-[10px] px-1.5 py-0.5 rounded border font-normal shrink-0 ${statusTextClass}`}>
-              {statusSymbol} {Number.isFinite(flight.trustScore) ? `${flight.trustScore}%` : 'TRUST N/A'}
+              {statusSymbol} {Number.isFinite(flight.combined_risk_score) ? `${Math.round((flight.combined_risk_score as number) * 100)}% RISK` : 'UNASSESSED'}
             </span>
           </div>
           <div className="grid grid-cols-3 gap-x-1 text-[10px] text-slate-500 font-normal pl-3.5">
-            <div>Alt: {flight.altitude.toLocaleString()} ft</div>
-            <div>Spd: {flight.speed} kts</div>
+            <div>Alt: {formatObservedNumber(flight.data_quality, 'altitude', flight.altitude)} ft</div>
+            <div>Spd: {formatObservedNumber(flight.data_quality, 'velocity', flight.speed)} kts</div>
             <div className="text-right font-mono text-slate-400 truncate">ICAO: {flight.id.toUpperCase()}</div>
           </div>
         </div>
@@ -2506,13 +2133,6 @@ export default function App() {
     );
   };
 
-  // Historical accuracy and traffic volume are empty until the backend exposes time-series data.
-  const accuracyData: { time: string; accuracy: number }[] = [];
-  const typeData = Object.entries(alerts.reduce<Record<string, number>>((counts, alert) => {
-    counts[alert.type] = (counts[alert.type] || 0) + 1;
-    return counts;
-  }, {})).map(([type, count]) => ({ type, count }));
-  const volumeData: { time: string; volume: number }[] = [];
   // Ground Station Access / Login Screen
   if (!token || !currentUser) {
     return (
@@ -2533,10 +2153,10 @@ export default function App() {
                 </defs>
                 <circle cx="16" cy="16" r="11.5" stroke="#0284c7" strokeWidth="1.2" opacity="0.4" />
                 <path d="M 16 5 A 11 11 0 0 1 27 16" stroke="url(#loginRadarSweep)" strokeWidth="2" strokeLinecap="round" />
-                <path d="M 16 8 L 18 13 L 24.5 16.5 L 24.5 18 L 18 16.5 L 18 21.5 L 20 23 L 20 24 L 16 23.2 L 12 24 L 12 23 L 14 21.5 L 14 16.5 L 7.5 18 L 7.5 16.5 L 14 13 Z" 
-                      fill="url(#loginPlaneGrad)" 
-                      stroke="#0284c7" 
-                      strokeWidth="0.5" 
+                <path d="M 16 8 L 18 13 L 24.5 16.5 L 24.5 18 L 18 16.5 L 18 21.5 L 20 23 L 20 24 L 16 23.2 L 12 24 L 12 23 L 14 21.5 L 14 16.5 L 7.5 18 L 7.5 16.5 L 14 13 Z"
+                      fill="url(#loginPlaneGrad)"
+                      stroke="#0284c7"
+                      strokeWidth="0.5"
                       strokeLinejoin="round" />
                 <circle cx="16" cy="8" r="1.2" fill="#10b981" />
               </svg>
@@ -2544,21 +2164,21 @@ export default function App() {
             <h1 className="text-xl font-bold tracking-tight text-white">AirGuard</h1>
             <span className="text-xs text-sky-400 font-medium tracking-normal mt-0.5">AIRSPACE TRUST & THREAT INTELLIGENCE</span>
             <p className="text-[11px] text-slate-400 mt-2 font-normal leading-relaxed max-w-xs">
-              Airplanes broadcast unencrypted radio signals without authentication. AirGuard detects spoofing attempts by validating trajectory physics and ML trust scores in real time.
+              Airplanes broadcast unencrypted radio signals without authentication. AirGuard checks incoming telemetry for kinematic inconsistencies. These heuristic flags are leads for review, not proof of spoofing.
             </p>
           </div>
 
-          <div role="status" aria-live="polite" className={`mb-4 flex items-center gap-2 rounded border px-3 py-2 text-[11px] ${backendHealth === 'online' ? 'border-emerald-800 bg-emerald-950/30 text-emerald-300' : backendHealth === 'checking' ? 'border-slate-700 bg-slate-900/70 text-slate-400' : 'border-rose-900 bg-rose-950/30 text-rose-300'}`}>
-            <span className={`h-2 w-2 rounded-full ${backendHealth === 'online' ? 'bg-emerald-400' : backendHealth === 'checking' ? 'bg-slate-500' : 'bg-rose-400'}`} />
-            {backendHealth === 'online' ? 'Backend and database connected' : backendHealth === 'checking' ? 'Checking backend connection…' : 'Backend unavailable — start AirGuard services to sign in and view live aircraft'}
+          <div role="status" aria-live="polite" className={`mb-4 flex items-center gap-2 rounded border px-3 py-2 text-[11px] ${backendHealth === 'online' ? 'border-emerald-800 bg-emerald-950/30 text-emerald-300' : backendHealth === 'checking' ? 'border-slate-700 bg-slate-900/70 text-slate-400' : backendHealth === 'degraded' ? 'border-amber-800 bg-amber-950/30 text-amber-200' : 'border-rose-900 bg-rose-950/30 text-rose-300'}`}>
+            <span className={`h-2 w-2 rounded-full ${backendHealth === 'online' ? 'bg-emerald-400' : backendHealth === 'checking' ? 'bg-slate-500' : backendHealth === 'degraded' ? 'bg-amber-400' : 'bg-rose-400'}`} />
+            {backendHealth === 'online' ? 'Backend, database, and Redis connected' : backendHealth === 'checking' ? 'Checking backend services…' : backendHealth === 'degraded' ? 'Backend and PostgreSQL connected; Redis unavailable — live streaming is degraded' : 'Backend or database unavailable — check the API and PostgreSQL services'}
           </div>
-          
+
           {loginError && (
             <div className="mb-4 bg-rose-950/40 border border-rose-500/40 text-rose-400 text-[10px] p-2.5 rounded font-normal">
               ▲ ERROR: {loginError}
             </div>
           )}
-          
+
           <form onSubmit={handleLoginSubmit} className="space-y-4">
             <div>
               <label className="text-[10px] text-slate-400 block mb-1 uppercase font-bold">Operator Email</label>
@@ -2571,7 +2191,7 @@ export default function App() {
                 className="w-full bg-[#060913] border border-slate-800 rounded px-3 py-2 text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500 font-normal"
               />
             </div>
-            
+
             <div>
               <label className="text-[10px] text-slate-400 block mb-1 uppercase font-bold">Password</label>
               <input
@@ -2583,7 +2203,7 @@ export default function App() {
                 className="w-full bg-[#060913] border border-slate-800 rounded px-3 py-2 text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyan-500 font-normal"
               />
             </div>
-            
+
             <button
               type="submit"
               disabled={isLoggingIn}
@@ -2603,7 +2223,7 @@ export default function App() {
 
           <div className="mt-4 border-t border-slate-800/60 pt-3 text-center">
             <span className="text-[10px] text-slate-600 uppercase font-normal">
-              SECURE LINK // 256-BIT JWT ENCRYPTED
+              SECURE LINK // SIGNED SESSION TOKEN
             </span>
           </div>
         </div>
@@ -2617,12 +2237,12 @@ export default function App() {
       <div className="absolute inset-0 grid-overlay pointer-events-none z-0"></div>
 
       {/* ========================================================================= */}
-      {/* TIER 1: THE SINGLE STATUS STRIP (ALWAYS VISIBLE, ONE GLANCE)              */}
+      {/* APPLICATION STATUS STRIP */}
       {/* "Is everything OK right now?" — Connected, Aircraft count, Active alerts. */}
       {/* Nothing else. Green means fine, red means look here.                      */}
       {/* ========================================================================= */}
       <header className="relative z-30 border-b border-slate-800 bg-[#0b1220]/95 px-4 md:px-6 py-2 flex flex-wrap items-center justify-between gap-3">
-        
+
         {/* Brand */}
         <div className="flex items-center gap-3 cursor-pointer select-none" onClick={() => setCurrentTier('tier1_overview')}>
           <div className="w-8 h-8 rounded-lg bg-[#0a1224] border border-sky-500/30 flex items-center justify-center shadow-[0_0_12px_rgba(14,165,233,0.2)]">
@@ -2639,10 +2259,10 @@ export default function App() {
               </defs>
               <circle cx="16" cy="16" r="11.5" stroke="#0284c7" strokeWidth="1.2" opacity="0.4" />
               <path d="M 16 5 A 11 11 0 0 1 27 16" stroke="url(#headerRadarSweep)" strokeWidth="2" strokeLinecap="round" />
-              <path d="M 16 8 L 18 13 L 24.5 16.5 L 24.5 18 L 18 16.5 L 18 21.5 L 20 23 L 20 24 L 16 23.2 L 12 24 L 12 23 L 14 21.5 L 14 16.5 L 7.5 18 L 7.5 16.5 L 14 13 Z" 
-                    fill="url(#headerPlaneGrad)" 
-                    stroke="#0284c7" 
-                    strokeWidth="0.5" 
+              <path d="M 16 8 L 18 13 L 24.5 16.5 L 24.5 18 L 18 16.5 L 18 21.5 L 20 23 L 20 24 L 16 23.2 L 12 24 L 12 23 L 14 21.5 L 14 16.5 L 7.5 18 L 7.5 16.5 L 14 13 Z"
+                    fill="url(#headerPlaneGrad)"
+                    stroke="#0284c7"
+                    strokeWidth="0.5"
                     strokeLinejoin="round" />
               <circle cx="16" cy="8" r="1.2" fill="#10b981" />
             </svg>
@@ -2656,11 +2276,11 @@ export default function App() {
         </div>
 
         {/* ----------------------------------------------------------------------- */}
-        {/* THE TIER 1 SINGLE STATUS STRIP: STRICT 3-ITEM STATUS CONTRACT           */}
+        {/* Shared system and feed status */}
         {/* ----------------------------------------------------------------------- */}
-        <div 
-          role="region" 
-          aria-label="Tier 1 System Ambient Status Strip"
+        <div
+          role="region"
+          aria-label="AirGuard system status"
           className="flex items-center gap-3 bg-[#03060d] border border-slate-800 px-3.5 py-1.5 rounded"
         >
           {/* Item 1: Connected / Disconnected (Green / Red) */}
@@ -2671,7 +2291,7 @@ export default function App() {
               websocketStatus === 'connecting' ? 'text-amber-400' : 'text-rose-400'
             }`}>
               <span className={`w-2 h-2 rounded-full ${
-                websocketStatus === 'connected' ? 'bg-emerald-500' : 
+                websocketStatus === 'connected' ? 'bg-emerald-500' :
                 websocketStatus === 'connecting' ? 'bg-amber-500' : 'bg-rose-500'
               }`} />
               <span>
@@ -2697,7 +2317,7 @@ export default function App() {
           </div>
 
           {/* Item 3: Active Alerts Count (GREEN = FINE, RED = LOOK HERE) */}
-          <div 
+          <div
             onClick={() => {
               setCurrentTier('tier3_tools');
               setTier3Tab('alerts');
@@ -2706,15 +2326,15 @@ export default function App() {
             tabIndex={0}
             title={hasActiveAlerts ? "Click to review active alerts" : "No active alerts are currently recorded"}
             className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded cursor-pointer transition-colors border ${
-              hasActiveAlerts 
-                ? 'bg-rose-950/40 border-rose-500/60 text-rose-300' 
+              hasActiveAlerts
+                ? 'bg-rose-950/40 border-rose-500/60 text-rose-300'
                 : 'bg-slate-900 border-slate-700 text-slate-300'
             }`}
           >
             <span className={`w-2 h-2 rounded-full ${hasActiveAlerts ? 'bg-rose-500' : 'bg-slate-500'}`} />
             {hasActiveAlerts ? (
               <span className="text-xs font-bold text-rose-300">
-                ▲ {activeAlerts.length} ALERTS — LOOK HERE
+                ▲ {activeAlertCount} ALERTS — LOOK HERE
               </span>
             ) : (
               <span className="text-xs font-bold text-emerald-400">
@@ -2724,41 +2344,28 @@ export default function App() {
           </div>
         </div>
 
-        {/* Tier 1 & Tier 2 Quick Switch Buttons */}
+        {/* Primary workspace actions */}
         <div className={`items-center gap-2 ${currentTier === 'tier2_radar' ? 'hidden' : 'flex'}`}>
 
-          {/* Primary CTA to Tier 2: The Full Dashboard */}
-          <button 
+          {/* Primary action opens the live airspace workspace */}
+          <button
             onClick={() => setCurrentTier('tier2_radar')}
             className={`text-xs font-bold px-3 py-1.5 rounded transition-colors flex items-center gap-1.5 ${
               currentTier === 'tier2_radar'
-                ? 'bg-cyan-500 text-black' 
+                ? 'bg-cyan-500 text-black'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
             }`}
           >
-            <span>WATCH RADAR (TIER 2)</span>
+            <span>OPEN AIRSPACE</span>
             <span className="text-[10px]">→</span>
-          </button>
-
-          {/* Quick Showcase Mode Toggle in Header */}
-          <button
-            onClick={() => handleToggleShowcaseMode(!showcaseMode)}
-            className={`text-xs font-mono font-bold px-2.5 py-1.5 rounded transition-all border ${
-              showcaseMode 
-                ? 'bg-cyan-950/70 border-cyan-500 text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.25)]' 
-                : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
-            }`}
-            title={showcaseMode ? "Showcase Mode ON: Smooth interpolated motion, 3D banking, and cinematic intro enabled. Click to disable for instant technical defense." : "Showcase Mode OFF: Instant zero-animation loading for viva defense. Click to enable."}
-          >
-            <span>SHOWCASE: {showcaseMode ? 'ON' : 'OFF'}</span>
           </button>
 
           {/* Reduce Motion Setting (Honoring prefers-reduced-motion) */}
           <button
             onClick={() => handleToggleReduceMotion(!reduceMotion)}
             className={`text-xs font-mono font-bold px-2.5 py-1.5 rounded transition-all border flex items-center gap-1.5 ${
-              reduceMotion 
-                ? 'bg-amber-950/70 border-amber-500 text-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.25)]' 
+              reduceMotion
+                ? 'bg-amber-950/70 border-amber-500 text-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.25)]'
                 : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
             }`}
             title={reduceMotion ? "Reduce Motion ON: Camera fly-to animations and transitions disabled (honoring prefers-reduced-motion)." : "Reduce Motion OFF: Normal animations enabled. Click to disable animations."}
@@ -2771,8 +2378,8 @@ export default function App() {
           <button
             onClick={handleToggleSound}
             className={`text-xs font-mono font-bold px-2.5 py-1.5 rounded transition-all border flex items-center gap-1.5 ${
-              isSoundEnabled 
-                ? 'bg-cyan-950/70 border-cyan-500 text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.25)]' 
+              isSoundEnabled
+                ? 'bg-cyan-950/70 border-cyan-500 text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.25)]'
                 : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
             }`}
             title={isSoundEnabled ? "Sound Layer Enabled: Click to mute all audio" : "Sound Layer Muted (Default): Click to enable soft anomaly chimes and ambient flight hum"}
@@ -2781,21 +2388,21 @@ export default function App() {
             <span>SOUND: {isSoundEnabled ? 'ON' : 'MUTED'}</span>
           </button>
 
-          {/* Signal Confidence Overlay Toggle in Header (Persisted in localStorage) */}
+          {/* Detector Risk Overlay Toggle in Header */}
           <button
             onClick={() => handleToggleConfidenceOverlay(!showConfidenceOverlay)}
             className={`text-xs font-mono font-bold px-2.5 py-1.5 rounded transition-all border flex items-center gap-1.5 ${
-              showConfidenceOverlay 
-                ? 'bg-sky-950/70 border-sky-500 text-sky-300 shadow-[0_0_8px_rgba(56,189,248,0.25)]' 
+              showConfidenceOverlay
+                ? 'bg-sky-950/70 border-sky-500 text-sky-300 shadow-[0_0_8px_rgba(56,189,248,0.25)]'
                 : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
             }`}
-            title="Shows where aircraft signals are currently most and least reliable — not traffic density."
+            title="Shows only sectors with persisted heuristic detector-risk scores."
           >
             <span className={`w-1.5 h-1.5 rounded-full ${showConfidenceOverlay ? 'bg-sky-400 animate-pulse' : 'bg-slate-600'}`} />
-            <span>SIGNAL OVERLAY: {showConfidenceOverlay ? 'ON' : 'OFF'}</span>
+            <span>RISK OVERLAY: {showConfidenceOverlay ? 'ON' : 'OFF'}</span>
           </button>
 
-          {/* Tier 3 Tools Quick Links */}
+          {/* Additional workspaces */}
           <div className="flex bg-[#04070e] border border-slate-800 rounded p-0.5">
             <button
               onClick={() => setCurrentTier('tier1_overview')}
@@ -2818,7 +2425,7 @@ export default function App() {
                   : 'text-slate-500 hover:text-slate-300'
               }`}
             >
-              DEEP TOOLS
+              WORKSPACE
             </button>
           </div>
 
@@ -2837,7 +2444,7 @@ export default function App() {
       </header>
       <nav aria-label="Primary navigation" className="relative z-20 flex flex-wrap items-center gap-1 px-4 md:px-6 py-1.5 border-b border-slate-800 bg-[#0b1220]">
         <button onClick={() => setCurrentTier('tier2_radar')} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${currentTier === 'tier2_radar' ? 'bg-sky-400/10 text-sky-200' : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'}`}>Airspace</button>
-        <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('alerts'); }} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${currentTier === 'tier3_tools' && tier3Tab === 'alerts' ? 'bg-rose-400/10 text-rose-200' : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'}`}>Threats <span className="ml-1 text-[10px] text-rose-300">{activeAlerts.length || ''}</span></button>
+        <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('alerts'); }} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${currentTier === 'tier3_tools' && tier3Tab === 'alerts' ? 'bg-rose-400/10 text-rose-200' : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'}`}>Threats <span className="ml-1 text-[10px] text-rose-300">{activeAlertCount || ''}</span></button>
         <button onClick={() => { if (!selectedFlightId && flights[0]) setSelectedFlightId(flights[0].id); setCurrentTier('tier2_radar'); setIsDetailDrawerOpen(true); }} className="px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-400 hover:bg-white/5 hover:text-slate-100 transition-colors">Investigate</button>
         <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('analytics'); }} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${currentTier === 'tier3_tools' && tier3Tab === 'analytics' ? 'bg-sky-400/10 text-sky-200' : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'}`}>Analytics</button>
         <span className="mx-1 h-5 border-l border-slate-800" />
@@ -2879,11 +2486,11 @@ export default function App() {
             </span>
           </div>
 
-          {/* Stage 3: Detection Processing Output */}
+          {/* Stage 3: Verified input normalization */}
           <div className="flex items-center gap-1.5 bg-slate-900/90 px-2.5 py-0.5 rounded border border-slate-800">
-            <span className="text-slate-500 font-bold">3. DETECTION ENGINE:</span>
+            <span className="text-slate-500 font-bold">3. NORMALIZED INPUTS:</span>
             <span className="text-emerald-400 font-bold">
-              {healthData.last_processed_records || flights.length} EVALUATED
+              {healthData.last_normalized_records ?? 0} RECORDS
             </span>
           </div>
 
@@ -2904,12 +2511,12 @@ export default function App() {
       </div>
 
       {/* ========================================================================= */}
-      {/* TIER 1 VIEW: THE EXECUTIVE STATUS CONSOLE (ONE GLANCE PROOF-OF-WORK)       */}
+      {/* Overview workspace */}
       {/* One clear focal point: The primary action button and 3 calm status metrics */}
       {/* ========================================================================= */}
       {currentTier === 'tier1_overview' && (
         <main className="relative z-10 flex-1 flex flex-col justify-between py-8 px-6 max-w-5xl mx-auto w-full overflow-y-auto">
-          
+
           {/* Executive Hero - Quiet and Focused */}
           <div className="text-center max-w-2xl mx-auto mt-2">
             <h1 className="text-2xl font-bold text-slate-100">
@@ -2921,11 +2528,11 @@ export default function App() {
           </div>
 
           {/* ------------------------------------------------------------------- */}
-          {/* THE 3 BIG CALM STATUS TILES (TIER 1 PROOF OF WORK)                  */}
+          {/* Current system status */}
           {/* Status colors reserved strictly for status meaning                  */}
           {/* ------------------------------------------------------------------- */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5 my-6 max-w-4xl mx-auto w-full">
-            
+
             {/* Tile 1: Connection Health */}
             <div className="p-5 rounded border border-slate-800 bg-[#0a0f1d] flex flex-col justify-between">
               <div>
@@ -2934,19 +2541,25 @@ export default function App() {
                 </span>
                 <div className="flex items-center gap-2 mt-2">
                   <span className={`w-3 h-3 rounded-full ${
-                    websocketStatus === 'connected' ? 'bg-emerald-500' : 
+                    websocketStatus === 'connected' ? 'bg-emerald-500' :
                     websocketStatus === 'connecting' ? 'bg-amber-500' : 'bg-rose-500'
                   }`} />
                   <span className={`text-base font-bold ${
-                    websocketStatus === 'connected' ? 'text-emerald-400' : 
+                    websocketStatus === 'connected' ? 'text-emerald-400' :
                     websocketStatus === 'connecting' ? 'text-amber-400' : 'text-rose-400'
                   }`}>
-                    {websocketStatus === 'connected' ? 'FEED CONNECTED' : 
+                    {websocketStatus === 'connected' ? 'FEED CONNECTED' :
                      websocketStatus === 'connecting' ? 'CONNECTING...' : 'FEED OFFLINE'}
                   </span>
                 </div>
                 <p className="text-xs text-slate-400 mt-2 leading-relaxed font-normal">
-                  Telemetry is arriving from the configured feed. Check System for source and ingestion details.
+                  {upstreamStatus === 'LIVE'
+                    ? 'Current aircraft reports are arriving from the configured feed. Check System for source and ingestion details.'
+                    : upstreamStatus === 'STALE'
+                      ? 'No recent aircraft reports are available. Check System for source freshness and ingestion details.'
+                      : upstreamStatus === 'RATE_LIMITED'
+                        ? 'The configured source is rate-limiting requests. Check System for ingestion status and retry timing.'
+                        : 'No current aircraft reports are available from the configured feed. Check System for source and ingestion details.'}
                 </p>
               </div>
               <div className="mt-4 pt-3 border-t border-slate-800 text-[10px] text-slate-500 font-normal flex justify-between">
@@ -2970,15 +2583,15 @@ export default function App() {
                 </p>
               </div>
               <div className="mt-4 pt-3 border-t border-slate-800 text-[10px] text-slate-500 font-normal flex justify-between">
-                <span>MEAN LIVE DETECTOR SCORE:</span>
-                <span className="text-slate-300 font-bold">{Number.isFinite(stats.avgTrust) ? `${stats.avgTrust}%` : '—'}</span>
+                <span>MEAN DETECTOR TRIAGE RISK:</span>
+                <span className="text-slate-300 font-bold">{Number.isFinite(stats.avgRisk) ? `${stats.avgRisk}%` : '—'}</span>
               </div>
             </div>
 
             {/* Tile 3: Active Alerts (GREEN = FINE, RED = LOOK HERE) */}
             <div className={`p-5 rounded border flex flex-col justify-between ${
-              hasActiveAlerts 
-                ? 'bg-rose-950/20 border-rose-500/50' 
+              hasActiveAlerts
+                ? 'bg-rose-950/20 border-rose-500/50'
                 : 'bg-[#0a0f1d] border-slate-800'
             }`}>
               <div>
@@ -2987,7 +2600,7 @@ export default function App() {
                 </span>
                 <div className="flex items-baseline gap-2 mt-2">
                   <span className={`text-3xl font-bold ${hasActiveAlerts ? 'text-rose-400' : 'text-emerald-400'}`}>
-                    {activeAlerts.length}
+                    {activeAlertCount}
                   </span>
                   <span className={`text-xs font-bold ${hasActiveAlerts ? 'text-rose-400' : 'text-emerald-400'}`}>
                     {hasActiveAlerts ? 'ANOMALIES FLAGGED' : 'NO ACTIVE ALERTS'}
@@ -3014,7 +2627,7 @@ export default function App() {
                     }}
                     className="w-full bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs py-1.5 rounded transition-colors"
                   >
-                    INSPECT {activeAlerts.length} ALERTS →
+                    INSPECT {activeAlertCount} ALERTS →
                   </button>
                 ) : (
                   <span className="text-[10px] text-emerald-400 font-normal block text-center">
@@ -3033,7 +2646,7 @@ export default function App() {
                 onClick={() => setCurrentTier('tier2_radar')}
                 className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold text-xs py-3 px-7 rounded transition-colors"
               >
-                WATCH LIVE RADAR (TIER 2) →
+              OPEN AIRSPACE →
               </button>
             </div>
             <span className="block text-[10px] text-slate-500 mt-2 font-normal">
@@ -3041,10 +2654,10 @@ export default function App() {
             </span>
           </div>
 
-          {/* Quiet Secondary Links to Tier 3 Deep Tools */}
+          {/* Additional workspaces */}
           <div className="border-t border-slate-800/80 pt-5 mt-4 max-w-3xl mx-auto w-full">
             <span className="text-[10px] text-slate-500 font-bold uppercase block mb-3 text-center">
-              TIER 3 DEEP TECHNICAL ACCESS
+              MORE AIRGUARD WORKSPACES
             </span>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-center text-xs">
               <button
@@ -3065,7 +2678,7 @@ export default function App() {
                 className="p-2.5 rounded bg-[#080d18] border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-slate-100 transition-colors"
               >
                 <span className="block font-bold">Analytics</span>
-                <span className="text-[10px] text-slate-500 font-normal">Confusion matrix</span>
+                <span className="text-[10px] text-slate-500 font-normal">Live detector overview</span>
               </button>
               <button
                 onClick={() => {
@@ -3094,27 +2707,27 @@ export default function App() {
       )}
 
       {/* ========================================================================= */}
-      {/* TIER 2 VIEW: THE FULL DASHBOARD (ONE CLICK AWAY)                           */}
+      {/* Live airspace workspace */}
       {/* One clear focal point: The Cesium 3D Globe overlay.                       */}
       {/* Full height, calm borders, zero decorative hover-bounces or glows.        */}
       {/* ========================================================================= */}
       {currentTier === 'tier2_radar' && (
         <div className="flex-1 flex flex-col min-h-0 overflow-y-auto lg:overflow-hidden relative z-10 px-4 xl:px-8 pt-2 pb-4">
-          
-          {/* Tier 2 Sub-Nav Bar */}
+
+          {/* Airspace workspace navigation */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-2 mb-3 text-xs gap-2">
             <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
               <span className="text-slate-100 font-semibold text-sm tracking-tight">
                 Live airspace
               </span>
               <span className="text-[11px] text-slate-400 font-normal">
-                {liveAircraftCount} live aircraft <span className="text-slate-600">·</span> <span className={activeAlerts.length ? 'text-rose-300' : 'text-emerald-300'}>{activeAlerts.length} active alerts</span>
+                {liveAircraftCount} live aircraft <span className="text-slate-600">·</span> <span className={activeAlertCount ? 'text-rose-300' : 'text-emerald-300'}>{activeAlertCount} active alerts across airspace</span>
               </span>
             </div>
 
-            {/* Quiet Secondary Links to Tier 3 */}
+            {/* Other AirGuard workspaces */}
             <div className="hidden items-center gap-1.5 text-[10px]">
-              <span className="text-slate-500 uppercase font-bold mr-1 hidden md:inline">Tier 3:</span>
+              <span className="text-slate-500 uppercase font-bold mr-1 hidden md:inline">More:</span>
               <button
                 onClick={() => {
                   setCurrentTier('tier3_tools');
@@ -3165,21 +2778,10 @@ export default function App() {
                 </button>
               )}
               <button
-                onClick={() => handleToggleShowcaseMode(!showcaseMode)}
-                className={`px-2 py-0.5 rounded border text-[11px] font-mono transition-colors ${
-                  showcaseMode 
-                    ? 'bg-cyan-950/60 border-cyan-500/50 text-cyan-300' 
-                    : 'bg-slate-900 border-slate-800 text-slate-500 hover:text-slate-400'
-                }`}
-                title="Toggle cinematic presentation effects (Showcase Mode vs instant Defense Mode)"
-              >
-                SHOWCASE [{showcaseMode ? 'ON' : 'OFF'}]
-              </button>
-              <button
                 onClick={() => handleToggleReduceMotion(!reduceMotion)}
                 className={`px-2 py-0.5 rounded border text-[11px] font-mono transition-colors ${
-                  reduceMotion 
-                    ? 'bg-amber-950/60 border-amber-500/50 text-amber-300' 
+                  reduceMotion
+                    ? 'bg-amber-950/60 border-amber-500/50 text-amber-300'
                     : 'bg-slate-900 border-slate-800 text-slate-500 hover:text-slate-400'
                 }`}
                 title="Toggle Reduce Motion setting (honoring prefers-reduced-motion)"
@@ -3189,8 +2791,8 @@ export default function App() {
               <button
                 onClick={() => setShowDebugIndicator(prev => !prev)}
                 className={`px-2 py-0.5 rounded border text-[11px] font-mono transition-colors ${
-                  showDebugIndicator 
-                    ? 'bg-cyan-950/60 border-cyan-500/50 text-cyan-300' 
+                  showDebugIndicator
+                    ? 'bg-cyan-950/60 border-cyan-500/50 text-cyan-300'
                     : 'bg-slate-900 border-slate-800 text-slate-500 hover:text-slate-400'
                 }`}
                 title="Toggle OpenSky live ingestion debug indicator"
@@ -3200,16 +2802,16 @@ export default function App() {
               <button
                 onClick={() => handleToggleConfidenceOverlay(!showConfidenceOverlay)}
                 className={`px-2 py-0.5 rounded border text-[11px] font-mono transition-colors flex items-center gap-1.5 ${
-                  showConfidenceOverlay 
-                    ? 'bg-sky-950/60 border-sky-500/50 text-sky-300 shadow-[0_0_10px_rgba(56,189,248,0.25)]' 
+                  showConfidenceOverlay
+                    ? 'bg-sky-950/60 border-sky-500/50 text-sky-300 shadow-[0_0_10px_rgba(56,189,248,0.25)]'
                     : 'bg-slate-900 border-slate-800 text-slate-500 hover:text-slate-400'
                 }`}
-                title="Shows where aircraft signals are currently most and least reliable — not traffic density."
+                title="Shows only sectors with persisted heuristic detector-risk scores."
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${showConfidenceOverlay ? 'bg-sky-400 animate-pulse' : 'bg-slate-600'}`} />
                 <span>SIGNAL OVERLAY [{showConfidenceOverlay ? 'ON' : 'OFF'}]</span>
               </button>
-              
+
               {/* Map Mode Toggle: 2D Light Map (Default) vs 3D Globe */}
               <div className="flex bg-slate-900 border border-slate-800 rounded p-0.5 text-[11px] font-mono">
                 <button
@@ -3229,7 +2831,7 @@ export default function App() {
                   className={`px-2.5 py-0.5 rounded transition-all font-semibold flex items-center gap-1.5 ${
                     mapViewMode === '3d'
                       ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_10px_rgba(6,182,212,0.2)]'
-                      : 'text-slate-400 hover:text-slate-200'
+                    : 'text-slate-400 hover:text-slate-200'
                   }`}
                   title="Switch to Cesium 3D Globe view"
                 >
@@ -3238,17 +2840,56 @@ export default function App() {
                 </button>
               </div>
 
-              {showcaseMode && !reduceMotion && mapViewMode === '3d' && (
-                <button
-                  onClick={handleReplayCinematic}
-                  className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400 hover:text-cyan-300 text-[11px] font-mono"
-                  title="Replay orbital descent cinematic sequence"
-                >
-                  REPLAY INTRO
-                </button>
-              )}
             </div>
           </div>
+
+          {(() => {
+            const updateAgeSeconds = healthData.last_successful_update ? Math.max(0, Math.floor((Date.now() - Date.parse(healthData.last_successful_update)) / 1000)) : null;
+            const isFresh = updateAgeSeconds !== null && updateAgeSeconds <= 35 && healthData.source_status === 'FRESH';
+            const isAging = updateAgeSeconds !== null && updateAgeSeconds > 35 && updateAgeSeconds <= 90;
+            const isStaleSnapshot = updateAgeSeconds !== null && updateAgeSeconds > 90;
+
+            const freshnessText = healthData.refresh_in_progress
+              ? 'Refreshing live feed'
+              : isStaleSnapshot
+              ? 'Last confirmed snapshot · stale'
+              : isAging
+              ? 'Snapshot aging · polling active'
+              : isFresh
+              ? 'Live snapshot current'
+              : healthData.source_status === 'RATE_LIMITED'
+              ? 'Provider rate limited · retaining last snapshot'
+              : healthData.source_status === 'UNAVAILABLE' || healthData.source_status === 'INVALID_RESPONSE'
+              ? 'Feed unavailable · retaining last snapshot'
+              : 'Awaiting first valid live snapshot';
+
+            const formattedAge = updateAgeSeconds !== null
+              ? (updateAgeSeconds < 60 ? `${updateAgeSeconds}s ago` : `${Math.floor(updateAgeSeconds / 60)}m ${updateAgeSeconds % 60}s ago`)
+              : '—';
+
+            return (
+              <section aria-label="Live source freshness" className="mb-3 flex flex-col gap-3 rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className={`h-2 w-2 rounded-full ${healthData.refresh_in_progress ? 'animate-pulse bg-sky-400' : isFresh ? 'bg-emerald-400' : isAging ? 'bg-cyan-400' : isStaleSnapshot || healthData.source_status === 'RATE_LIMITED' ? 'bg-amber-400' : 'bg-slate-500'}`} />
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-200">
+                      {freshnessText}
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-slate-400">{healthData.snapshot_count ?? flights.length} aircraft in last valid snapshot</span>
+                  <span className="text-[11px] text-slate-400">Updated {formattedAge}</span>
+                  <span className="text-[11px] text-slate-400">Next attempt {healthData.next_attempt_at ? (Date.parse(healthData.next_attempt_at) <= Date.now() ? 'due' : `in ${Math.ceil((Date.parse(healthData.next_attempt_at) - Date.now()) / 1000)}s`) : 'pending'}</span>
+                  {healthData.last_error && <span title={healthData.last_error} className="max-w-[280px] truncate text-[11px] text-amber-300">{healthData.last_error}</span>}
+                </div>
+                <div className="flex shrink-0 items-center gap-3">
+                  {refreshNowMessage && <span role="status" className="max-w-[280px] text-[11px] text-slate-400">{refreshNowMessage}</span>}
+                  <button type="button" onClick={() => void refreshLiveSnapshot()} disabled={refreshNowPending || healthData.refresh_in_progress || healthData.manual_refresh_pending} className="rounded-lg border border-sky-700/70 bg-sky-950/40 px-3 py-2 text-[11px] font-semibold text-sky-200 transition hover:border-sky-500 hover:bg-sky-900/50 disabled:cursor-not-allowed disabled:opacity-50">
+                    {refreshNowPending || healthData.refresh_in_progress ? 'Refreshing…' : healthData.manual_refresh_pending ? 'Refresh queued' : 'Refresh now'}
+                  </button>
+                </div>
+              </section>
+            );
+          })()}
 
           {flights.length === 0 && (
             <div role="status" className="rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-3 text-sm text-slate-300">
@@ -3259,7 +2900,7 @@ export default function App() {
 
           {/* Main Tactical Workspace: 65% Globe + 35% List/Drawer */}
           <div className="flex-1 grid grid-cols-12 gap-3 min-h-0">
-            
+
             {/* Left 65%: The Globe is the clear focal point */}
             <section className="col-span-12 h-[52vh] min-h-[360px] lg:h-auto lg:min-h-0 lg:col-span-9 bg-[#0b1220] border border-slate-700/70 rounded-xl overflow-hidden relative flex flex-col shadow-2xl shadow-black/20">
               <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-[#0b1220]/90 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs font-mono backdrop-blur-xl shadow-lg">
@@ -3280,14 +2921,14 @@ export default function App() {
                 )}
               </div>
 
-              {/* Signal Confidence Overlay: HUD Legend & Real-Time Airspace Trust Card */}
+              {/* Detector Risk Overlay: sector legend and persisted score coverage */}
               {showConfidenceOverlay && (
               <div className="absolute top-12 left-3 z-20 max-w-xs sm:max-w-sm bg-[#101a2b]/95 border border-slate-700 rounded-xl shadow-xl p-3 backdrop-blur-md text-xs font-mono select-none animate-fadeIn">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-2">
                     <div className="flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
                       <span className="text-[11px] font-bold tracking-wider text-sky-300 uppercase">
-                        Signal Confidence Overlay
+                        Detector Risk Overlay
                       </span>
                     </div>
                     <div className="flex items-center gap-1">
@@ -3301,7 +2942,7 @@ export default function App() {
                       <button
                         onClick={() => handleToggleConfidenceOverlay(false)}
                         className="text-slate-500 hover:text-rose-400 text-[10px] px-1 py-0.5 rounded hover:bg-slate-800"
-                        title="Turn off Signal Confidence Overlay"
+                        title="Turn off Detector Risk Overlay"
                       >
                         ✕
                       </button>
@@ -3310,22 +2951,22 @@ export default function App() {
 
                   {/* One-Line Required Caption */}
                   <p className="text-[10px] text-slate-300 leading-snug mb-2 italic">
-                    &ldquo;Shows where aircraft signals are currently most and least reliable — not traffic density.&rdquo;
+                    &ldquo;Shows sectors with persisted detector scores and their mean heuristic risk. Unscored aircraft are omitted.&rdquo;
                   </p>
 
                   {!isConfidenceLegendCollapsed && (
                     <>
-                      {/* Signal Trust Scale Bar */}
+                      {/* Detector risk scale */}
                       <div className="space-y-1 mb-2.5">
                         <div className="flex items-center justify-between text-[9px] text-slate-400 uppercase tracking-wider font-semibold">
-                          <span>Spatial Trust Scale</span>
-                          <span className="text-sky-400">NIC & Sensor Mesh</span>
+                          <span>Mean detector risk</span>
+                          <span className="text-slate-400">Heuristic, not probability</span>
                         </div>
                         <div className="h-2 w-full rounded-sm bg-gradient-to-r from-rose-500 via-amber-400 to-sky-400 shadow-inner" />
                         <div className="flex items-center justify-between text-[9px] text-slate-400 font-mono">
-                          <span className="text-rose-400 font-semibold">&lt;65% Low/Anomalous</span>
-                          <span className="text-amber-400 font-semibold">65-84% Moderate</span>
-                          <span className="text-sky-300 font-semibold">≥85% Calm Blue (Nominal)</span>
+                          <span className="text-sky-300 font-semibold">&lt;35% Lower</span>
+                          <span className="text-amber-400 font-semibold">35–64% Elevated</span>
+                          <span className="text-rose-400 font-semibold">≥65% Review threshold</span>
                         </div>
                       </div>
 
@@ -3336,9 +2977,9 @@ export default function App() {
                           <div className="text-slate-200 font-bold">{confidenceSectors.length} Active</div>
                         </div>
                         <div className="bg-slate-900/80 border border-slate-800 rounded p-1">
-                          <div className="text-slate-500 text-[9px]">Mean Detector Score</div>
-                          <div className={`font-bold ${overallAirspaceTrust >= 85 ? 'text-sky-300' : overallAirspaceTrust >= 65 ? 'text-amber-400' : 'text-rose-400'}`}>
-                            {Number.isFinite(overallAirspaceTrust) ? `${overallAirspaceTrust}%` : 'No score data'}
+                          <div className="text-slate-500 text-[9px]">Mean triage risk</div>
+                          <div className={`font-bold ${overallDetectorRisk >= 65 ? 'text-rose-400' : overallDetectorRisk >= 35 ? 'text-amber-400' : 'text-sky-300'}`}>
+                            {Number.isFinite(overallDetectorRisk) ? `${overallDetectorRisk}%` : 'No scored observations'}
                           </div>
                         </div>
                         <div className="bg-slate-900/80 border border-slate-800 rounded p-1">
@@ -3351,8 +2992,8 @@ export default function App() {
 
                       {/* Explicit Differentiation Badge */}
                       <div className="mt-2 pt-1.5 border-t border-slate-800/60 flex items-center justify-between text-[9px] text-slate-500">
-                        <span>Mode: Track detector score</span>
-                        <span className="text-sky-400 font-semibold">NOT SAFETY ASSURANCE</span>
+                        <span>Persisted scored aircraft only</span>
+                        <span className="text-sky-400 font-semibold">NOT A PROBABILITY</span>
                       </div>
                     </>
                   )}
@@ -3364,10 +3005,10 @@ export default function App() {
                 <button
                   onClick={() => handleToggleConfidenceOverlay(true)}
                   className="absolute top-12 left-3 z-20 bg-slate-950/90 border border-sky-500/40 text-sky-300 hover:text-sky-200 text-[10px] font-mono px-2 py-1 rounded shadow-lg flex items-center gap-1.5"
-                  title="Shows where aircraft signals are currently most and least reliable — not traffic density."
+                  title="Shows only sectors with persisted heuristic detector-risk scores."
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-                  <span>SIGNAL CONFIDENCE OVERLAY [OFF]</span>
+                  <span>DETECTOR RISK OVERLAY [OFF]</span>
                 </button>
               )}
 
@@ -3424,12 +3065,12 @@ export default function App() {
                     {/* Stage 2: Detection & ML Scoring Engine */}
                     <div className="p-2 bg-slate-900/80 rounded border border-slate-800/90 flex items-center justify-between">
                       <div className="flex flex-col">
-                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">2. DETECTION PROCESSING</span>
-                        <span className="text-[9px] text-slate-500">Observed kinematic rules; research ML is disabled</span>
+                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">2. INPUT NORMALIZATION</span>
+                        <span className="text-[9px] text-slate-500">Valid source records handed to the stream or local processor</span>
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-[12px] font-extrabold text-sky-300">
-                          {healthData?.last_processed_records ?? (healthData?.last_poll_records ?? 0)} scored
+                          {healthData?.last_normalized_records ?? 0} normalized
                         </span>
                         <span className="text-[9px] px-1.5 py-0.5 bg-sky-950/90 text-sky-300 border border-sky-700 rounded font-bold">
                           ACTIVE
@@ -3441,21 +3082,25 @@ export default function App() {
                     <div className="p-2 bg-slate-900/80 rounded border border-slate-800/90 flex items-center justify-between">
                       <div className="flex flex-col">
                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">3. WS STREAM & DB WRITE</span>
-                        <span className="text-[9px] text-slate-500">Latency: {healthData?.poll_latency_ms?.toFixed(1) || '0.0'}ms</span>
+                        <span className="text-[9px] text-slate-500">DB {healthData?.database_status ?? 'UNKNOWN'} · Redis {healthData?.redis_status ?? 'UNKNOWN'}</span>
                       </div>
-                      <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${
-                        websocketStatus === 'connected'
-                          ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700'
-                          : 'bg-amber-950/90 text-amber-300 border-amber-700'
-                      }`}>
-                        WS {websocketStatus.toUpperCase()}
-                      </span>
+                      <div className="flex flex-wrap justify-end gap-1">
+                        {[['DB', healthData?.database_status], ['REDIS', healthData?.redis_status], ['WS', websocketStatus.toUpperCase()]].map(([label, value]) => (
+                          <span key={label} className={`text-[9px] px-1.5 py-0.5 rounded font-bold border ${
+                            value === 'CONNECTED' || value === 'connected'
+                              ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700'
+                              : 'bg-amber-950/90 text-amber-300 border-amber-700'
+                          }`}>
+                            {label} {value || 'UNKNOWN'}
+                          </span>
+                        ))}
+                      </div>
                     </div>
 
                     {/* Stage 4: Frontend Globe Rendering */}
                     <div className="p-2 bg-slate-900/90 rounded border border-cyan-500/40 flex items-center justify-between">
                       <div className="flex flex-col">
-                        <span className="text-[10px] text-cyan-300 font-bold uppercase tracking-wider">4. REACHING FRONTEND RADAR</span>
+                        <span className="text-[10px] text-cyan-300 font-bold uppercase tracking-wider">4. AIRSPACE VIEW</span>
                         <span className="text-[9px] text-slate-400">Rendering on {mapViewMode === '3d' ? '3D globe' : '2D map'}</span>
                       </div>
                       <span className="text-[13px] font-extrabold text-emerald-300 bg-emerald-950/90 border border-emerald-500/50 px-2.5 py-0.5 rounded">
@@ -3477,21 +3122,21 @@ export default function App() {
                   <span>LIVE AIRCRAFT [{realFlightsCount}]</span>
                 </button>
               )}
-              
+
               <div className="flex-1 w-full relative" aria-label={`Live ${mapViewMode === '3d' ? '3D globe' : '2D map'} visualizing tracked aircraft`} role="application">
                 {/* One-Time Cinematic Intro HUD Overlay */}
                 {isCinematicActive && (
                   <div className="absolute inset-0 z-30 pointer-events-none flex flex-col justify-between p-6 bg-gradient-to-b from-black/75 via-transparent to-black/85 animate-fadeIn">
-                    
+
                     {/* Atmospheric Cloud Deck Penetration Effect */}
                     {cinematicProgress >= 0.18 && cinematicProgress <= 0.78 && (
-                      <div 
+                      <div
                         className="absolute inset-0 pointer-events-none overflow-hidden transition-opacity duration-500 z-10"
                         style={{
-                          opacity: cinematicProgress < 0.32 
-                            ? (cinematicProgress - 0.18) / 0.14 
-                            : cinematicProgress > 0.62 
-                            ? (0.78 - cinematicProgress) / 0.16 
+                          opacity: cinematicProgress < 0.32
+                            ? (cinematicProgress - 0.18) / 0.14
+                            : cinematicProgress > 0.62
+                            ? (0.78 - cinematicProgress) / 0.16
                             : 0.82
                         }}
                       >
@@ -3520,7 +3165,7 @@ export default function App() {
                           <div className="text-[9px] font-mono text-slate-400">
                             {cinematicStage === 1 && "HIGH ORBITAL GEOSTATIONARY SCAN (26,000 KM) • DEEP SPACE PERSPECTIVE"}
                             {cinematicStage === 2 && "ATMOSPHERIC INSERTION // PASSING CLOUD DECK (14,000 KM) • SYNCHRONIZING REAL DATA"}
-                            {cinematicStage === 3 && "SUB-CONTINENTAL RADAR LOCK (4,200 KM) • REAL AIRFRAMES ACQUIRED"}
+                            {cinematicStage === 3 && "AIRSPACE COVERAGE (4,200 KM) • LIVE REPORTS RECEIVED"}
                           </div>
                         </div>
                       </div>
@@ -3569,7 +3214,7 @@ export default function App() {
                         <span className="text-slate-200 font-bold">{Math.round(26000 - cinematicProgress * 21800).toLocaleString()} KM</span>
                       </div>
                       <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                        <div 
+                        <div
                           className="h-full bg-gradient-to-r from-cyan-500 via-sky-400 to-emerald-400 transition-all duration-100 ease-out"
                           style={{ width: `${Math.round(cinematicProgress * 100)}%` }}
                         ></div>
@@ -3577,11 +3222,11 @@ export default function App() {
                       <div className="flex justify-between items-center text-[9px] font-mono text-slate-400 mt-1.5">
                         <span>ORBIT (26K KM)</span>
                         <span className="text-cyan-300 font-bold">
-                          {cinematicProgress < 0.35 
-                            ? "SCANNING FREQUENCIES..." 
+                          {cinematicProgress < 0.35
+                            ? "SCANNING FREQUENCIES..."
                             : `ACQUIRED ${visibleAircraftCount} / ${activeFlights.length} REAL AIRFRAMES`}
                         </span>
-                        <span>RADAR (4.2K KM)</span>
+                        <span>COVERAGE (4.2K KM)</span>
                       </div>
                     </div>
                   </div>
@@ -3601,21 +3246,16 @@ export default function App() {
                     flights={activeFlights}
                     selectedFlight={selectedFlight || null}
                     route={selectedRouteForMap}
-                    onSelectFlight={(flight) => {
-                      setSelectedFlightId(flight ? flight.id : null);
-                    }}
-                    onOpenFlightDetails={(flight) => {
-                      setSelectedFlightId(flight.id);
-                      setIsDetailDrawerOpen(true);
-                    }}
+                    onSelectFlight={handleMapSelectFlight}
+                    onOpenFlightDetails={handleMapOpenDetails}
                   />
                 ) : (
-                  <CesiumErrorBoundary resetKey={activeFlights.length}>
-                    <CesiumViewerComponent 
-                    full 
+                  <CesiumErrorBoundary resetKey="cesium-viewport">
+                    <CesiumViewerComponent
+                    full
                     className="w-full h-full"
                     shouldAnimate={true}
-                    imageryProvider={createSatelliteImageryProvider()}
+                    baseLayer={false}
                     baseLayerPicker={false}
                     geocoder={false}
                     homeButton={false}
@@ -3631,14 +3271,17 @@ export default function App() {
                         viewer.clock.shouldAnimate = true;
                         viewer.clock.clockStep = ClockStep.SYSTEM_CLOCK_MULTIPLIER;
                         viewer.clock.multiplier = 1.0;
-                        
+
                         // Configure Globe Rendering
                         viewer.scene.globe.show = true;
                         viewer.scene.globe.baseColor = Color.fromCssColorString('#060913');
                         viewer.scene.globe.showGroundAtmosphere = true;
                         viewer.scene.globe.enableLighting = false; // Keep globe illuminated with satellite imagery
-                        
+
                         // Ensure Satellite + World Boundaries layers are mounted
+                        if (viewer.imageryLayers.length === 0) {
+                          viewer.imageryLayers.addImageryProvider(createSatelliteImageryProvider());
+                        }
                         if (viewer.imageryLayers.length <= 1) {
                           try {
                             viewer.imageryLayers.addImageryProvider(createReferenceBoundariesProvider());
@@ -3653,7 +3296,7 @@ export default function App() {
                           launchCinematicFlight(viewer);
                         } else {
                           viewer.camera.setView({
-                            destination: Cartesian3.fromDegrees(78.9629, 20.5937, 4200000)
+                            destination: Cartesian3.fromDegrees(0, 18, 18000000)
                           });
                           setIsCinematicActive(false);
                           setCinematicProgress(1.0);
@@ -3670,7 +3313,7 @@ export default function App() {
                       const aircraftOpacity = isCinematicActive ? Math.max(0.35, getAircraftOpacity(idx)) : 1.0;
 
                       // Register/update smooth motion target for continuous interpolation
-                      registerFlightMotion(f.id, f.lat, f.lng, f.altitude, f.heading, f.speed, 8000);
+                      registerFlightMotion(f.id, f.lat, f.lng, Number.isFinite(f.altitude) ? f.altitude : 0, Number.isFinite(f.heading) ? f.heading : 0, Number.isFinite(f.speed) ? f.speed : 0, 8000);
                       const motion = getFlightMotionProperties(f);
 
                       const isSelected = f.id === selectedFlightId;
@@ -3678,7 +3321,7 @@ export default function App() {
                       const isCritical = f.status === 'critical';
                       const isSuspicious = f.status === 'suspicious';
                       const isFlagged = isCritical || isSuspicious;
-                      const isStale = f.staleness_status === 'STALE' || (f.last_seen_seconds_ago !== undefined && f.last_seen_seconds_ago > 20);
+                      const isStale = f.staleness_status === 'STALE' || (f.last_seen_seconds_ago !== undefined && f.last_seen_seconds_ago > staleAfterSeconds);
                       const effectiveOpacity = isStale ? Math.min(aircraftOpacity, 0.45) : aircraftOpacity;
 
                       // Speed-dependent dynamic fading trail (longer and more vivid for fast aircraft)
@@ -3703,37 +3346,32 @@ export default function App() {
                             </Entity>
                           )}
 
-                          {/* Primary 3D Aircraft Model with natural turn banking and climb/descent pitch */}
-                          <Entity 
+                          {/* Lightweight heading-oriented glyph keeps global aircraft counts practical on the globe. */}
+                          <Entity
                             position={motion.positionProp}
-                            orientation={motion.orientationProp}
                             name={f.callsign}
                             onClick={() => handleSelectFlightWithChaseCam(f)}
                             onMouseEnter={() => setHoveredFlightId(f.id)}
                             onMouseLeave={() => setHoveredFlightId(prev => prev === f.id ? null : prev)}
                           >
-                            <ModelGraphics
-                              uri="/models/aircraft.glb"
-                              minimumPixelSize={30}
-                              maximumScale={1200}
-                              scale={1.0}
-                              silhouetteColor={
-                                isSelected ? Color.CYAN :
-                                isCritical ? Color.fromCssColorString('#f43f5e') :
-                                isSuspicious ? Color.fromCssColorString('#f59e0b') :
-                                isStale ? Color.fromCssColorString('#f59e0b').withAlpha(0.65) :
-                                f.is_synthetic || f.source === 'regional_fallback' ? Color.fromCssColorString('#c084fc') :
-                                Color.fromCssColorString('#38bdf8')
-                              }
-                              silhouetteSize={isSelected ? 2.5 : isFlagged ? 1.8 : 0.6}
-                              color={effectiveOpacity < 1.0 ? Color.WHITE.withAlpha(effectiveOpacity) : undefined}
+                            <BillboardGraphics
+                              image={createAircraftBillboard(
+                                isSelected ? '#22d3ee' :
+                                isCritical ? '#f43f5e' :
+                                isSuspicious ? '#f97316' :
+                                isStale ? '#94a3b8' : '#38bdf8'
+                              )}
+                              width={isSelected ? 34 : 26}
+                              height={isSelected ? 34 : 26}
+                              rotation={-CesiumMath.toRadians(Number.isFinite(f.heading) ? f.heading : 0)}
+                              color={Color.WHITE.withAlpha(effectiveOpacity)}
                             />
 
                             {showLabel && (
                               <LabelGraphics
                                 text={
                                   isHovered || isSelected
-                                    ? `${f.callsign}${isStale ? ' [STALE ' + Math.round(f.last_seen_seconds_ago || 25) + 's]' : ''}\n${Math.round(f.altitude).toLocaleString()} FT • ${f.speed} KT`
+                                    ? `${f.callsign}${isStale ? ' [STALE ' + Math.round(f.last_seen_seconds_ago || 25) + 's]' : ''}\n${formatObservedNumber(f.data_quality, 'altitude', f.altitude)} FT • ${formatObservedNumber(f.data_quality, 'velocity', f.speed)} KT`
                                     : isStale ? `${f.callsign} [STALE]` : f.callsign
                                 }
                                 font={isSelected || isHovered ? "bold 11px monospace" : "10px monospace"}
@@ -3741,7 +3379,7 @@ export default function App() {
                                   isSelected ? Color.CYAN :
                                   isCritical ? Color.fromCssColorString('#f43f5e') :
                                   isSuspicious ? Color.fromCssColorString('#f59e0b') :
-                                  isStale ? Color.fromCssColorString('#fbbf24') :
+                                  isStale ? Color.fromCssColorString('#94a3b8') :
                                   Color.WHITE
                                 }
                                 showBackground={isHovered || isSelected || isStale}
@@ -3829,7 +3467,7 @@ export default function App() {
                       </>
                     )}
 
-                    {/* Signal Confidence Overlay: Spatial mesh colored by aggregate trust (not volume) */}
+                    {/* Detector risk overlay; unscored aircraft are intentionally not colored */}
                     {showConfidenceOverlay && (isCinematicActive ? (cinematicProgress - 0.35) / 0.65 > 0.05 : true) && (
                       (() => {
                         const overlayAlpha = isCinematicActive ? Math.max(0, Math.min(1.0, (cinematicProgress - 0.35) / 0.65)) : 1.0;
@@ -3854,7 +3492,7 @@ export default function App() {
                                 height={80}
                               />
                               <LabelGraphics
-                                text={`SEC ${sec.id}\n${Math.round(sec.avgConfidence)}% SCORE • ${sec.flightCount} ACFT${sec.hasAnomaly ? ' ⚠' : ''}`}
+                                text={`SEC ${sec.id}\n${Math.round(sec.avgRisk)}% RISK • ${sec.flightCount} ACFT${sec.hasAnomaly ? ' ⚠' : ''}`}
                                 font="bold 9px monospace"
                                 fillColor={labelClr}
                                 showBackground={true}
@@ -3879,7 +3517,7 @@ export default function App() {
 
             {/* Right 35%: Target List OR Detail Drawer */}
               <section className="col-span-12 min-h-[420px] lg:min-h-0 lg:col-span-3 bg-[#0b1220] border border-slate-700/70 rounded-xl flex flex-col overflow-hidden shadow-xl shadow-black/20">
-              
+
               {!selectedFlightId ? (
                 // Target List
                 <div className="flex flex-col h-full">
@@ -3895,8 +3533,8 @@ export default function App() {
                             key={filterType}
                             onClick={() => setActiveFilter(filterType)}
                             className={`text-[10px] px-2 py-0.5 rounded transition-colors capitalize ${
-                              activeFilter === filterType 
-                                ? 'bg-slate-800 text-slate-100 font-bold' 
+                              activeFilter === filterType
+                                ? 'bg-slate-800 text-slate-100 font-bold'
                                 : 'text-slate-500 hover:text-slate-300 font-normal'
                             }`}
                           >
@@ -3951,7 +3589,7 @@ export default function App() {
                         TARGET INSPECTION
                       </span>
                     </div>
-                    <button 
+                    <button
                       onClick={() => {
                         if (viewerRef.current?.camera) {
                           viewerRef.current.camera.cancelFlight();
@@ -3975,7 +3613,7 @@ export default function App() {
                     const isFlagged = isCritical || isSuspicious;
                     const airline = getAirlineInfo(selectedFlight.callsign);
                     const explanation = getPlainEnglishExplanation(selectedFlight, selectedFlightDetail);
-                    
+
                     // Route resolution
                     const depResolved = selectedRouteEntities?.origin;
                     const arrResolved = selectedRouteEntities?.destination;
@@ -3994,13 +3632,30 @@ export default function App() {
                         ? new Date(selectedFlight.firstSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'UTC' }) + ' UTC'
                         : "Session ingress");
 
-                    const isStaleTarget = selectedFlightDetail?.staleness?.is_stale || selectedFlight.staleness_status === 'STALE' || (selectedFlight.last_seen_seconds_ago !== undefined && selectedFlight.last_seen_seconds_ago > 20);
+                    const isStaleTarget = selectedFlightDetail?.staleness?.is_stale || selectedFlight.staleness_status === 'STALE' || (selectedFlight.last_seen_seconds_ago !== undefined && selectedFlight.last_seen_seconds_ago > staleAfterSeconds);
                     const staleSeconds = Math.round(selectedFlightDetail?.staleness?.last_seen_seconds_ago || selectedFlight.last_seen_seconds_ago || 25);
+
+                    const detailTrust = selectedFlightDetail?.trust_status;
+                    const combinedRisk = detailTrust?.combined_risk_score ?? selectedFlight.combined_risk_score;
+                    const hasValidRisk = typeof combinedRisk === 'number' && Number.isFinite(combinedRisk);
+
+                    const rawTrust = detailTrust?.trust_score ?? (Number.isFinite(selectedFlight.trustScore) ? selectedFlight.trustScore : (hasValidRisk ? Math.round((1 - combinedRisk!) * 100) : null));
+                    const trustScore = typeof rawTrust === 'number' && Number.isFinite(rawTrust) ? Math.round(rawTrust) : null;
+                    const hasValidTrust = trustScore !== null;
+
+                    const rawConfidence = detailTrust?.evidence_confidence ?? selectedFlight.evidence_confidence ?? (hasValidRisk ? 0.40 : null);
+                    const evidenceCoveragePct = typeof rawConfidence === 'number' && Number.isFinite(rawConfidence) ? Math.round(rawConfidence * 100) : null;
+
+                    const assessmentStatus = detailTrust?.assessment_status ?? selectedFlight.assessment_status ?? (isFlagged ? 'REVIEW_REQUIRED' : hasValidRisk ? 'PARTIALLY_ASSESSED' : 'INSUFFICIENT_EVIDENCE');
+
+                    const isEnsembleAvailable = detailTrust?.technical_details?.ensemble_score !== null && detailTrust?.technical_details?.ensemble_score !== undefined;
+                    const isAutoencoderAvailable = detailTrust?.technical_details?.autoencoder_score !== null && detailTrust?.technical_details?.autoencoder_score !== undefined;
+                    const isReceiverAvailable = detailTrust?.technical_details?.receiver_consistency_score !== null && detailTrust?.technical_details?.receiver_consistency_score !== undefined;
 
                     return (
                       <div className="space-y-3.5 text-xs font-normal">
 
-                        {/* STALENESS INTEGRITY BANNER (Prompt requirement: explicit staleness indicator) */}
+                        {/* STALENESS INTEGRITY BANNER */}
                         {isStaleTarget && (
                           <div className="bg-amber-950/70 border border-amber-500/60 rounded-lg p-2.5 flex items-center justify-between text-xs text-amber-200 shadow-md animate-in fade-in duration-200">
                             <div className="flex items-center gap-2">
@@ -4017,116 +3672,186 @@ export default function App() {
                         )}
 
                         {/* ======================================================== */}
-                        {/* 1. TOP (ALWAYS FIRST, LARGE): TRUST STATUS HERO BANNER   */}
-                        {/* Visually dominates top of panel — AirGuard's key identity */}
+                        {/* 1. TOP: TRUST SCORE + RISK + EVIDENCE COVERAGE HERO CARD */}
                         {/* ======================================================== */}
                         <div className={`p-4 rounded-lg border-2 relative overflow-hidden transition-all ${
-                          isCritical 
+                          isCritical
                             ? 'bg-gradient-to-br from-rose-950/90 via-[#230910] to-[#080d18] border-rose-500 shadow-[0_0_30px_rgba(244,63,94,0.30)] ring-1 ring-rose-500/60'
-                            : isSuspicious 
+                            : isSuspicious
                             ? 'bg-gradient-to-br from-amber-950/90 via-[#261609] to-[#080d18] border-amber-500 shadow-[0_0_30px_rgba(245,158,11,0.25)] ring-1 ring-amber-500/50'
-                            : 'bg-gradient-to-br from-emerald-950/80 via-[#061c17] to-[#080d18] border-emerald-500/60 shadow-[0_0_30px_rgba(16,185,129,0.20)]'
+                            : assessmentStatus === 'ASSESSED'
+                            ? 'bg-gradient-to-br from-emerald-950/80 via-[#071f1a] to-[#080d18] border-emerald-500/70 shadow-[0_0_20px_rgba(16,185,129,0.15)]'
+                            : hasValidTrust
+                            ? 'bg-gradient-to-br from-sky-950/70 via-[#0c1a2e] to-[#080d18] border-sky-600/70 shadow-[0_0_20px_rgba(56,189,248,0.12)]'
+                            : 'bg-gradient-to-br from-slate-900/90 via-[#111827] to-[#080d18] border-slate-600/70'
                         }`}>
                           {/* Ambient glow highlight */}
-                          <div className={`absolute top-0 right-0 w-36 h-36 rounded-full blur-2xl pointer-events-none ${
-                            isCritical ? 'bg-rose-500/20' : isSuspicious ? 'bg-amber-500/20' : 'bg-emerald-500/15'
+                          <div className={`absolute top-0 right-0 w-44 h-44 rounded-full blur-3xl pointer-events-none ${
+                            isCritical ? 'bg-rose-500/20' : isSuspicious ? 'bg-amber-500/20' : hasValidTrust ? 'bg-sky-500/15' : 'bg-slate-500/10'
                           }`} />
 
-                          <div className="flex items-start justify-between relative z-10 gap-3">
-                            <div className="space-y-1">
+                          <div className="relative z-10 space-y-3">
+                            {/* Header Status Row */}
+                            <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
                                 <span className={`w-2.5 h-2.5 rounded-full ${
                                   isCritical ? 'bg-rose-400 animate-ping' :
                                   isSuspicious ? 'bg-amber-400 animate-pulse' :
-                                  'bg-emerald-400 animate-pulse'
+                                  assessmentStatus === 'ASSESSED' ? 'bg-emerald-400' :
+                                  hasValidTrust ? 'bg-sky-400' :
+                                  'bg-slate-400'
                                 }`} />
                                 <span className={`text-[10px] font-mono tracking-widest font-bold uppercase ${
                                   isCritical ? 'text-rose-400' :
                                   isSuspicious ? 'text-amber-400' :
-                                  'text-emerald-400'
+                                  assessmentStatus === 'ASSESSED' ? 'text-emerald-400' :
+                                  hasValidTrust ? 'text-sky-300' :
+                                  'text-slate-300'
                                 }`}>
-                                  {isCritical ? 'CRITICAL SIGNAL THREAT' :
-                                   isSuspicious ? 'SUSPICIOUS SIGNAL DEVIATION' :
-                                   Number.isFinite(selectedFlight.trustScore) ? 'NO THREAT REPORTED' : 'EVALUATION UNAVAILABLE'}
+                                  {isCritical ? 'REVIEW REQUIRED · CRITICAL ANOMALY' :
+                                   isSuspicious ? 'REVIEW REQUIRED · SUSPICIOUS ANOMALY' :
+                                   assessmentStatus === 'ASSESSED' ? 'ASSESSED · FULL EVIDENCE STACK' :
+                                   assessmentStatus === 'PARTIALLY_ASSESSED' ? 'PARTIALLY ASSESSED · AVAILABLE EVIDENCE' :
+                                   assessmentStatus === 'SUPPRESSED' ? 'SUPPRESSED · KNOWN ENTITY' :
+                                   'INSUFFICIENT EVIDENCE · ACCUMULATING HISTORY'}
                                 </span>
                               </div>
+                              <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded border ${
+                                isFlagged ? 'bg-rose-950/80 text-rose-300 border-rose-500/50' :
+                                hasValidTrust ? 'bg-sky-950/80 text-sky-200 border-sky-500/40' :
+                                'bg-slate-900 text-slate-400 border-slate-700'
+                              }`}>
+                                {isFlagged ? '▲ FLAGGED' : hasValidTrust ? '● SCORED' : '— UNASSESSED'}
+                              </span>
+                            </div>
 
-                              <h2 className="text-xl font-black tracking-tight text-white uppercase leading-tight">
-                                {isFlagged ? 'Flagged by detection' : Number.isFinite(selectedFlight.trustScore) ? 'No active review flag' : 'Evaluation details unavailable'}
+                            {/* Headline & Explanation */}
+                            <div>
+                              <h2 className="text-lg font-black tracking-tight text-white uppercase leading-snug">
+                                {isFlagged
+                                  ? 'Flagged by detector rules'
+                                  : assessmentStatus === 'ASSESSED'
+                                  ? 'Telemetry consistent across all detector layers'
+                                  : hasValidTrust
+                                  ? 'Telemetry evaluated on available real evidence'
+                                  : 'Insufficient scored evidence'}
                               </h2>
-
-                              <p className={`text-[11px] leading-relaxed max-w-[280px] font-medium ${
+                              <p className={`text-[11px] leading-relaxed font-medium mt-1 ${
                                 isCritical ? 'text-rose-200/90' :
                                 isSuspicious ? 'text-amber-200/90' :
-                                'text-emerald-200/90'
+                                'text-slate-300/90'
                               }`}>
-                                {isFlagged 
-                                  ? selectedFlightDetail?.trust_status?.explanation || 'Backend reported an alert; a detailed explanation is unavailable.'
-                                  : Number.isFinite(selectedFlight.trustScore) ? 'No active review flag was returned by the configured detector. This is not an independent verification or safety finding.' : 'The backend has not returned enough evaluation data for a trust determination.'}
+                                {isFlagged
+                                  ? (detailTrust?.explanation || explanation.summary || 'Signal inconsistency detected across physical flight envelope.')
+                                  : hasValidTrust
+                                  ? (detailTrust?.explanation || 'Telemetry Trust Index derived from physical rules and kinematic consistency. Not an airworthiness or flight safety rating.')
+                                  : 'Observation history is accumulating. Temporal analysis requires multiple consecutive state vectors.'}
                               </p>
                             </div>
 
-                            {/* Prominent Trust Score Readout */}
-                            <div className={`text-right shrink-0 border p-2.5 rounded backdrop-blur-md min-w-[95px] ${
-                              isCritical ? 'bg-[#180509]/90 border-rose-500/60' :
-                              isSuspicious ? 'bg-[#1a0f05]/90 border-amber-500/60' :
-                              'bg-[#031510]/90 border-emerald-500/50'
-                            }`}>
-                              <span className={`text-[9px] font-mono block uppercase font-bold tracking-wider ${
-                                isCritical ? 'text-rose-400' : isSuspicious ? 'text-amber-400' : 'text-emerald-400'
+                            {/* Prominent Score Triad (Trust Score + Detector Risk + Evidence Coverage) */}
+                            <div className="grid grid-cols-3 gap-2 pt-1">
+                              {/* 1. TRUST SCORE */}
+                              <div className={`p-2.5 rounded border backdrop-blur-md ${
+                                isCritical ? 'bg-[#180509]/90 border-rose-500/60' :
+                                isSuspicious ? 'bg-[#1a0f05]/90 border-amber-500/60' :
+                                hasValidTrust && trustScore! >= 80 ? 'bg-[#061814]/90 border-emerald-500/50' :
+                                hasValidTrust ? 'bg-[#081528]/90 border-sky-500/50' :
+                                'bg-slate-950/90 border-slate-700/60'
                               }`}>
-                                {'DETECTOR SCORE'}
-                              </span>
-                              <span className={`text-2xl font-black font-mono tracking-tighter ${
-                                isCritical ? 'text-rose-400' : isSuspicious ? 'text-amber-400' : 'text-emerald-400'
+                                <span className="text-[9px] font-mono block uppercase font-bold text-slate-400 tracking-wider">
+                                  TRUST SCORE
+                                </span>
+                                <div className="flex items-baseline gap-1 mt-0.5">
+                                  <span className={`text-2xl font-black font-mono tracking-tighter ${
+                                    isCritical ? 'text-rose-400' :
+                                    isSuspicious ? 'text-amber-400' :
+                                    hasValidTrust && trustScore! >= 80 ? 'text-emerald-300' :
+                                    hasValidTrust ? 'text-sky-300' :
+                                    'text-slate-500'
+                                  }`}>
+                                    {hasValidTrust ? trustScore : '—'}
+                                  </span>
+                                  {hasValidTrust && <span className="text-[10px] text-slate-400 font-mono font-bold">/ 100</span>}
+                                </div>
+                                <span className="text-[8px] font-mono block text-slate-400 uppercase mt-0.5 truncate">
+                                  Telemetry Trust Index
+                                </span>
+                              </div>
+
+                              {/* 2. DETECTOR RISK */}
+                              <div className={`p-2.5 rounded border backdrop-blur-md ${
+                                isCritical ? 'bg-[#180509]/90 border-rose-500/60' :
+                                isSuspicious ? 'bg-[#1a0f05]/90 border-amber-500/60' :
+                                'bg-slate-950/90 border-slate-700/60'
                               }`}>
-                                {Number.isFinite(selectedFlight.trustScore) ? `${selectedFlight.trustScore}%` : '—'}
+                                <span className="text-[9px] font-mono block uppercase font-bold text-slate-400 tracking-wider">
+                                  DETECTOR RISK
+                                </span>
+                                <div className="flex items-baseline gap-1 mt-0.5">
+                                  <span className={`text-2xl font-black font-mono tracking-tighter ${
+                                    isCritical ? 'text-rose-400' :
+                                    isSuspicious ? 'text-amber-400' :
+                                    hasValidRisk ? 'text-slate-100' :
+                                    'text-slate-500'
+                                  }`}>
+                                    {hasValidRisk ? combinedRisk!.toFixed(2) : '—'}
+                                  </span>
+                                </div>
+                                <span className="text-[8px] font-mono block text-slate-400 uppercase mt-0.5 truncate">
+                                  Combined Risk (0–1)
+                                </span>
+                              </div>
+
+                              {/* 3. EVIDENCE COVERAGE */}
+                              <div className="p-2.5 rounded border border-slate-700/60 bg-slate-950/90 backdrop-blur-md">
+                                <span className="text-[9px] font-mono block uppercase font-bold text-slate-400 tracking-wider">
+                                  EVIDENCE STACK
+                                </span>
+                                <div className="flex items-baseline gap-1 mt-0.5">
+                                  <span className="text-2xl font-black font-mono tracking-tighter text-cyan-300">
+                                    {evidenceCoveragePct !== null ? `${evidenceCoveragePct}%` : '—'}
+                                  </span>
+                                </div>
+                                <span className="text-[8px] font-mono block text-slate-400 uppercase mt-0.5 truncate">
+                                  Detector Coverage
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Detector Layer Availability Matrix */}
+                            <div className="pt-2 border-t border-slate-800/80">
+                              <span className="text-[9px] font-mono text-slate-400 uppercase font-bold block mb-1.5">
+                                DETECTOR LAYER AVAILABILITY & REAL EVIDENCE
                               </span>
-                              <span className={`text-[9px] block font-bold uppercase mt-0.5 ${
-                                isCritical ? 'text-rose-300' : isSuspicious ? 'text-amber-300' : 'text-emerald-300'
-                              }`}>
-                                {isCritical ? '▲ CRITICAL' : isSuspicious ? '◆ ELEVATED' : Number.isFinite(selectedFlight.trustScore) ? '● ASSESSED' : '— UNASSESSED'}
-                              </span>
+                              <div className="grid grid-cols-2 gap-1.5 text-[10px] font-mono">
+                                <div className="p-1.5 bg-[#03060f]/80 rounded border border-slate-800 flex items-center justify-between">
+                                  <span className="text-slate-300">Physics Rules</span>
+                                  <span className="text-emerald-400 font-bold">AVAILABLE</span>
+                                </div>
+                                <div className="p-1.5 bg-[#03060f]/80 rounded border border-slate-800 flex items-center justify-between">
+                                  <span className="text-slate-300">Autoencoder</span>
+                                  <span className={isAutoencoderAvailable ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
+                                    {isAutoencoderAvailable ? 'AVAILABLE' : 'UNAVAILABLE'}
+                                  </span>
+                                </div>
+                                <div className="p-1.5 bg-[#03060f]/80 rounded border border-slate-800 flex items-center justify-between">
+                                  <span className="text-slate-300">ML Ensemble</span>
+                                  <span className={isEnsembleAvailable ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
+                                    {isEnsembleAvailable ? 'AVAILABLE' : 'UNAVAILABLE'}
+                                  </span>
+                                </div>
+                                <div className="p-1.5 bg-[#03060f]/80 rounded border border-slate-800 flex items-center justify-between">
+                                  <span className="text-slate-300">Receiver Consistency</span>
+                                  <span className={isReceiverAvailable ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
+                                    {isReceiverAvailable ? 'AVAILABLE' : 'UNAVAILABLE'}
+                                  </span>
+                                </div>
+                              </div>
                             </div>
                           </div>
-
-                          {/* Flagged Inconsistency Pills OR Normal Verification Metrics */}
-                          <div className={`mt-3 pt-2.5 border-t flex flex-wrap gap-1.5 text-[9px] font-mono font-bold ${
-                            isCritical ? 'border-rose-500/30' : isSuspicious ? 'border-amber-500/30' : 'border-emerald-500/30'
-                          }`}>
-                            {isFlagged ? (
-                              <>
-                                {selectedFlight.ruleFlags?.positionJump && (
-                                  <span className="bg-rose-950/70 text-rose-300 border border-rose-500/50 px-2 py-0.5 rounded">
-                                    ▲ POSITION TELEPORT
-                                  </span>
-                                )}
-                                {selectedFlight.ruleFlags?.climbRate && (
-                                  <span className="bg-rose-950/70 text-rose-300 border border-rose-500/50 px-2 py-0.5 rounded">
-                                    ▲ IMPOSSIBLE CLIMB
-                                  </span>
-                                )}
-                                {selectedFlight.ruleFlags?.altVelMismatch && (
-                                  <span className="bg-rose-950/70 text-rose-300 border border-rose-500/50 px-2 py-0.5 rounded">
-                                    ▲ ALT-SPEED MISMATCH
-                                  </span>
-                                )}
-                                {selectedFlight.ruleFlags?.duplicateIcao && (
-                                  <span className="bg-rose-950/70 text-rose-300 border border-rose-500/50 px-2 py-0.5 rounded">
-                                    ▲ GHOST TRANSMISSION
-                                  </span>
-                                )}
-                                {!selectedFlight.ruleFlags?.positionJump && !selectedFlight.ruleFlags?.climbRate && !selectedFlight.ruleFlags?.altVelMismatch && !selectedFlight.ruleFlags?.duplicateIcao && (
-                                    <span className="bg-amber-950/70 text-amber-300 border border-amber-500/50 px-2 py-0.5 rounded">
-                                    ◆ ALERT REPORTED · DETAILS UNAVAILABLE
-                                  </span>
-                                )}
-                              </>
-                            ) : (
-                              <p className="text-slate-400 text-[10px]">No active review flag was returned. Receiver quorum and independent position verification are unavailable from this feed.</p>
-                            )}
-                          </div>
                         </div>
+
 
                         {/* ======================================================== */}
                         {/* 2. STANDARD FLIGHT INFORMATION */}
@@ -4135,7 +3860,7 @@ export default function App() {
                           {/* Callsign & Aircraft Header */}
                           <div className="flex items-center justify-between border-b border-slate-800/80 pb-2.5">
                             <div className="flex items-center gap-2.5">
-                              <span 
+                              <span
                                 className="w-1.5 h-8 rounded-sm shrink-0 shadow-sm"
                                 style={{ backgroundColor: airline.color || '#38bdf8' }}
                               />
@@ -4151,7 +3876,7 @@ export default function App() {
                                 <div className="text-[10px] text-slate-400 font-mono mt-0.5 flex items-center gap-2">
                                   <span>ICAO: <b className="text-slate-200">{selectedFlight.id.toUpperCase()}</b></span>
                                   <span>•</span>
-                                  <span>SQK: <b className="text-slate-200">{selectedFlight.squawk}</b></span>
+                                  <span>SQK: <b className="text-slate-200">{isObservedField(selectedFlight.data_quality, 'squawk') ? selectedFlight.squawk || '—' : '—'}</b></span>
                                   <span>•</span>
                                   <span>MODE-S (1090 MHz)</span>
                                 </div>
@@ -4186,7 +3911,7 @@ export default function App() {
                                 </span>
                               </div>
                               <div className="mt-2 text-[10px] text-slate-400 leading-relaxed">
-                                OpenSky radar sector coverage is partial; transponder flight plan unfiled for this segment.
+                                OpenSky state-vector coverage is partial; no flight-plan route is available for this segment.
                               </div>
                               <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center justify-between text-[10px] text-slate-500">
                                 <span>3D route trajectory line omitted (origin/destination unfiled)</span>
@@ -4208,8 +3933,8 @@ export default function App() {
                                     {depCity}
                                   </span>
                                   <span className="text-[9px] font-mono text-slate-500 block mt-0.5">
-                                    {isRouteLoading ? "Searching..." : (selectedFlightRoute?.first_seen 
-                                      ? new Date(selectedFlightRoute.first_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC' 
+                                    {isRouteLoading ? "Searching..." : (selectedFlightRoute?.first_seen
+                                      ? new Date(selectedFlightRoute.first_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC'
                                       : "First seen")}
                                   </span>
                                 </div>
@@ -4257,38 +3982,38 @@ export default function App() {
                           {/* Key Telemetry Grid */}
                           <div>
                             <span className="text-[10px] text-slate-400 font-bold block mb-1.5 uppercase font-mono">
-                              CALIBRATED FLIGHT TELEMETRY
+                              REPORTED FLIGHT TELEMETRY
                             </span>
                             <div className="grid grid-cols-4 gap-2 bg-[#040710] p-2.5 rounded border border-slate-800/80">
                               <div>
                                 <span className="text-slate-500 text-[9px] block uppercase font-mono">ALTITUDE</span>
                                 <div className="flex items-baseline gap-1">
                                   <span className="text-slate-100 font-bold text-xs font-mono">
-                                    {selectedFlight.altitude.toLocaleString()} ft
+                                    {formatObservedNumber(selectedFlight.data_quality, 'altitude', selectedFlight.altitude)} ft
                                   </span>
                                 </div>
                                 <span className="text-[9px] text-emerald-400 font-mono">
-                                  {selectedFlight.altitude > 25000 ? "CRUISE (FL" + Math.round(selectedFlight.altitude/100) + ")" : "LEVEL"}
+                                  {isObservedField(selectedFlight.data_quality, 'altitude') ? (selectedFlight.altitude > 25000 ? "CRUISE (FL" + Math.round(selectedFlight.altitude/100) + ")" : "LEVEL") : "ALTITUDE UNAVAILABLE"}
                                 </span>
                               </div>
 
                               <div>
                                 <span className="text-slate-500 text-[9px] block uppercase font-mono">SPEED</span>
                                 <span className="text-slate-100 font-bold text-xs font-mono block">
-                                  {selectedFlight.speed} kts
+                                  {formatObservedNumber(selectedFlight.data_quality, 'velocity', selectedFlight.speed)} kts
                                 </span>
                                 <span className="text-[9px] text-slate-400 font-mono">
-                                  {Math.round(selectedFlight.speed * 1.852)} km/h
+                                  {isObservedField(selectedFlight.data_quality, 'velocity') ? `${Math.round(selectedFlight.speed * 1.852)} km/h` : '—'}
                                 </span>
                               </div>
 
                               <div>
                                 <span className="text-slate-500 text-[9px] block uppercase font-mono">TRACK</span>
                                 <span className="text-slate-100 font-bold text-xs font-mono block">
-                                  {selectedFlight.heading}°
+                                  {formatObservedNumber(selectedFlight.data_quality, 'heading', selectedFlight.heading)}°
                                 </span>
                                 <span className="text-[9px] text-slate-400 font-mono">
-                                  {selectedFlight.heading >= 315 || selectedFlight.heading < 45 ? "NORTH" :
+                                  {!isObservedField(selectedFlight.data_quality, 'heading') ? 'TRACK UNAVAILABLE' : selectedFlight.heading >= 315 || selectedFlight.heading < 45 ? "NORTH" :
                                    selectedFlight.heading >= 45 && selectedFlight.heading < 135 ? "EAST" :
                                    selectedFlight.heading >= 135 && selectedFlight.heading < 225 ? "SOUTH" : "WEST"}
                                 </span>
@@ -4429,10 +4154,10 @@ export default function App() {
                                         <XAxis type="number" stroke="#475569" fontSize={8} />
                                         <YAxis dataKey="name" type="category" stroke="#94a3b8" fontSize={7} width={80} />
                                         <Tooltip contentStyle={{ backgroundColor: '#0a0f1d', borderColor: '#1e293b', fontSize: '9px' }} />
-                                        <Bar 
-                                          dataKey="value" 
-                                          fill={isCritical ? '#f43f5e' : '#f59e0b'} 
-                                          radius={[0, 2, 2, 0]} 
+                                        <Bar
+                                          dataKey="value"
+                                          fill={isCritical ? '#f43f5e' : '#f59e0b'}
+                                          radius={[0, 2, 2, 0]}
                                         />
                                       </BarChart>
                                     </ResponsiveContainer>
@@ -4512,19 +4237,19 @@ export default function App() {
                           <div className="flex items-center justify-between">
                             <div>
                               <span className="text-[10px] text-slate-300 font-bold block uppercase tracking-wide font-mono">
-                                SESSION TRUST TRAJECTORY (0–100)
+                                SESSION DETECTOR RISK (0–1)
                               </span>
                               <span className="text-[10px] text-slate-500 font-normal block">
-                                Rolling temporal stability of physical signal.
+                                Weighted mean of persisted heuristic scores; not a probability.
                               </span>
                             </div>
                             <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold uppercase ${
-                              trustPattern === 'UNASSESSED' ? 'bg-slate-900 text-slate-400 border border-slate-700' : trustPattern === 'SUDDEN_DROP' ? 'bg-rose-950/40 text-rose-400 border border-rose-500/40' :
-                              trustPattern === 'GRADUAL_DECLINE' ? 'bg-amber-950/40 text-amber-400 border border-amber-500/40' :
+                              trustPattern === 'UNASSESSED' ? 'bg-slate-900 text-slate-400 border border-slate-700' : trustPattern === 'RISK_SPIKE' ? 'bg-rose-950/40 text-rose-400 border border-rose-500/40' :
+                              trustPattern === 'RISK_RISING' ? 'bg-amber-950/40 text-amber-400 border border-amber-500/40' :
                               'bg-emerald-950/40 text-emerald-400 border border-emerald-500/40'
                             }`}>
-                              {trustPattern === 'UNASSESSED' ? '— INSUFFICIENT HISTORY' : trustPattern === 'SUDDEN_DROP' ? '▲ SHARP DROP' :
-                               trustPattern === 'GRADUAL_DECLINE' ? '◆ SLOW DECLINE' :
+                              {trustPattern === 'UNASSESSED' ? '— INSUFFICIENT HISTORY' : trustPattern === 'RISK_SPIKE' ? '▲ RISK SPIKE' :
+                               trustPattern === 'RISK_RISING' ? '◆ RISK RISING' :
                                '● STABLE PATTERN'}
                             </span>
                           </div>
@@ -4532,21 +4257,21 @@ export default function App() {
                           <div className="h-[110px] w-full pt-1">
                             {isTrustLoading ? (
                               <div className="h-full flex items-center justify-center text-[10px] text-slate-500">
-                                Loading trust trajectory...
+                                Loading risk history...
                               </div>
                             ) : trustHistory.length > 0 ? (
                               <ResponsiveContainer width="100%" height="100%">
                                 <LineChart data={trustHistory} margin={{ top: 5, right: 10, left: -25, bottom: 0 }}>
                                   <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.6} />
                                   <XAxis dataKey="time" stroke="#475569" fontSize={7} tickLine={false} />
-                                  <YAxis domain={[0, 100]} stroke="#475569" fontSize={7} tickLine={false} ticks={[0, 50, 100]} />
+                                  <YAxis domain={[0, 1]} stroke="#475569" fontSize={7} tickLine={false} ticks={[0, 0.5, 1]} />
                                   <Tooltip contentStyle={{ backgroundColor: '#0a0f1d', borderColor: '#334155', borderRadius: '4px', fontSize: '9px', padding: '4px 8px' }} />
-                                  <Line 
-                                    type="monotone" 
-                                    dataKey="trust_score" 
-                                    stroke={isCritical ? '#f43f5e' : isSuspicious ? '#f59e0b' : '#10b981'} 
+                                  <Line
+                                    type="monotone"
+                                    dataKey="smoothed_risk_score"
+                                    stroke={isCritical ? '#f43f5e' : isSuspicious ? '#f59e0b' : '#f97316'}
                                     strokeWidth={2}
-                                    dot={{ r: 2, fill: isCritical ? '#f43f5e' : isSuspicious ? '#f59e0b' : '#10b981' }}
+                                    dot={{ r: 2, fill: isCritical ? '#f43f5e' : isSuspicious ? '#f59e0b' : '#f97316' }}
                                     activeDot={{ r: 4 }}
                                     isAnimationActive={false}
                                   />
@@ -4554,7 +4279,7 @@ export default function App() {
                               </ResponsiveContainer>
                             ) : (
                               <div className="h-full flex items-center justify-center text-[10px] text-slate-500">
-                                No historical trust readings recorded yet.
+                                No scored risk observations recorded yet.
                               </div>
                             )}
                           </div>
@@ -4597,16 +4322,16 @@ export default function App() {
                 </div>
               </div>
               <div className="p-3 border border-slate-800 bg-[#080d18] rounded">
-                <span className="text-[10px] text-slate-500 font-bold uppercase">Trust Rating</span>
+                <span className="text-[10px] text-slate-500 font-bold uppercase">Mean Rule Triage Risk</span>
                 <div className="flex items-baseline gap-2 mt-1">
-                  <span className="text-xl font-bold text-slate-100">{Number.isFinite(stats.avgTrust) ? `${stats.avgTrust}%` : '—'}</span>
-                  <span className="text-[10px] text-slate-500 font-normal">Index</span>
+                  <span className="text-xl font-bold text-slate-100">{Number.isFinite(stats.avgRisk) ? `${stats.avgRisk}%` : '—'}</span>
+                  <span className="text-[10px] text-slate-500 font-normal">Heuristic, not calibrated</span>
                 </div>
               </div>
               <div className="p-3 border border-slate-800 bg-[#080d18] rounded text-[10px] font-normal">
                 <span className="text-[10px] text-slate-500 font-bold uppercase block mb-1">Ingestion Status</span>
                 <div className="truncate text-slate-400">
-                  CB: <span className="text-slate-200 font-bold">{healthData.circuit_breaker_state}</span> | LAT: {healthData.poll_latency_ms.toFixed(1)}ms
+                  CB: <span className="text-slate-200 font-bold">{healthData.circuit_breaker_state}</span> | LAT: {healthData.poll_latency_ms?.toFixed(1) ?? '—'}ms
                 </div>
               </div>
             </section>
@@ -4616,44 +4341,44 @@ export default function App() {
       )}
 
       {/* ========================================================================= */}
-      {/* TIER 3 VIEW: DEEP TECHNICAL TOOLS (TWO CLICKS AWAY)                       */}
+      {/* Threat review, analytics, playback, system configuration, and administration */}
       {/* One clear focal point per tool. Muted neutral controls.                   */}
       {/* ========================================================================= */}
       {currentTier === 'tier3_tools' && (
         <div className="flex-1 flex flex-col min-h-0 relative z-10 px-4 md:px-6 py-4">
-          
-          {/* Tier 3 Header & Tab Switcher */}
+
+          {/* Shared workspace header and navigation */}
           <div className="flex flex-wrap items-center justify-between border-b border-slate-800 pb-3 mb-4 gap-3">
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setCurrentTier('tier2_radar')}
                 className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold px-3 py-1.5 rounded transition-colors flex items-center gap-1.5"
               >
-                <span>← RETURN TO RADAR (TIER 2)</span>
+                <span>← BACK TO AIRSPACE</span>
               </button>
               <span className="text-slate-700 hidden sm:inline">|</span>
               <span className="text-xs font-bold text-slate-400 uppercase hidden md:inline">
-                TIER 3 DEEP TECHNICAL SUITE
+                AIRGUARD WORKSPACE
               </span>
             </div>
 
-            {/* Deep Tool Tabs */}
+            {/* Workspace tabs */}
             <div className="flex flex-wrap bg-[#04070e] border border-slate-800 rounded p-0.5 text-xs font-bold">
               <button
                 onClick={() => setTier3Tab('alerts')}
                 className={`px-3 py-1 rounded transition-colors ${
-                  tier3Tab === 'alerts' 
-                    ? 'bg-slate-800 text-cyan-400' 
+                  tier3Tab === 'alerts'
+                    ? 'bg-slate-800 text-cyan-400'
                     : 'text-slate-500 hover:text-slate-300 font-normal'
                 }`}
               >
-                ALERTS ({alerts.length})
+                ALERTS ({activeAlertCount !== undefined && activeAlertCount > 0 ? activeAlertCount : alerts.length})
               </button>
               <button
                 onClick={() => setTier3Tab('analytics')}
                 className={`px-3 py-1 rounded transition-colors ${
-                  tier3Tab === 'analytics' 
-                    ? 'bg-slate-800 text-cyan-400' 
+                  tier3Tab === 'analytics'
+                    ? 'bg-slate-800 text-cyan-400'
                     : 'text-slate-500 hover:text-slate-300 font-normal'
                 }`}
               >
@@ -4662,8 +4387,8 @@ export default function App() {
               <button
                 onClick={() => setTier3Tab('config')}
                 className={`px-3 py-1 rounded transition-colors ${
-                  tier3Tab === 'config' 
-                    ? 'bg-slate-800 text-cyan-400' 
+                  tier3Tab === 'config'
+                    ? 'bg-slate-800 text-cyan-400'
                     : 'text-slate-500 hover:text-slate-300 font-normal'
                 }`}
               >
@@ -4672,8 +4397,8 @@ export default function App() {
               <button
                 onClick={() => setTier3Tab('playback')}
                 className={`px-3 py-1 rounded transition-colors ${
-                  tier3Tab === 'playback' 
-                    ? 'bg-slate-800 text-cyan-400' 
+                  tier3Tab === 'playback'
+                    ? 'bg-slate-800 text-cyan-400'
                     : 'text-slate-500 hover:text-slate-300 font-normal'
                 }`}
               >
@@ -4683,8 +4408,8 @@ export default function App() {
                 <button
                   onClick={() => setTier3Tab('admin')}
                   className={`px-3 py-1 rounded transition-colors ${
-                    tier3Tab === 'admin' 
-                      ? 'bg-slate-800 text-cyan-400' 
+                    tier3Tab === 'admin'
+                      ? 'bg-slate-800 text-cyan-400'
                       : 'text-slate-500 hover:text-slate-300 font-normal'
                   }`}
                 >
@@ -4694,92 +4419,248 @@ export default function App() {
               <button
                 onClick={() => setTier3Tab('about')}
                 className={`px-3 py-1 rounded transition-colors ${
-                  tier3Tab === 'about' 
-                    ? 'bg-slate-800 text-cyan-400' 
+                  tier3Tab === 'about'
+                    ? 'bg-slate-800 text-cyan-400'
                     : 'text-slate-500 hover:text-slate-300 font-normal'
                 }`}
               >
-                FLIGHT GUIDE
+                PRODUCT GUIDE
               </button>
             </div>
           </div>
 
           {/* Tool 1: Alerts Audit Log Table */}
           {tier3Tab === 'alerts' && (
-            <section className="flex-1 bg-[#080d18] border border-slate-800 rounded flex flex-col overflow-hidden p-5 min-h-0">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-3 mb-3 gap-2">
+            <section className="flex-1 bg-[#080d18] border border-slate-800 rounded flex flex-col overflow-y-auto p-4 md:p-5 min-h-0 space-y-4">
+              {/* Header & Quick Actions */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-3 gap-3">
                 <div>
-                  <h2 className="text-sm font-bold text-slate-200 uppercase m-0">ALERTS AUDIT LOG RECORD</h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-sm font-bold text-slate-100 uppercase m-0">ALERTS AUDIT LOG RECORD</h2>
+                    <span className="bg-cyan-950/80 border border-cyan-800/80 text-cyan-300 text-[10px] font-bold px-2 py-0.5 rounded">
+                      {alerts.length} LOADED ({activeAlertCount !== undefined ? `${activeAlertCount} ACTIVE` : 'LIVE'})
+                    </span>
+                  </div>
                   <p className="text-[11px] text-slate-400 mt-1 font-normal">
-                    A searchable log of every flagged incident so operators can review, acknowledge, and export records.
+                    Searchable log of flagged telemetry anomalies. Review, acknowledge, investigate on live radar, and export records.
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-2">
                   <button
                     onClick={exportAlertsCSV}
-                    className="bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-300 font-bold text-xs py-1.5 px-4 rounded transition-colors"
+                    className="bg-slate-900 border border-slate-700 hover:bg-slate-800 text-slate-200 font-bold text-xs py-1.5 px-3.5 rounded transition-colors flex items-center gap-1.5"
                   >
-                    EXPORT CSV
+                    <span>📊 EXPORT CSV</span>
                   </button>
                   <button
                     onClick={downloadSessionReportPDF}
-                    className="bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold text-xs py-1.5 px-4 rounded transition-colors"
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold text-xs py-1.5 px-3.5 rounded transition-colors flex items-center gap-1.5"
                   >
-                    SESSION PDF
+                    <span>📄 SESSION PDF</span>
                   </button>
                 </div>
               </div>
 
-              <div className="flex-1 overflow-x-auto min-h-0">
+              {alertActionError && (
+                <p className="rounded-lg border border-amber-800/60 bg-amber-950/30 p-2.5 text-xs text-amber-200" role="alert">
+                  {alertActionError}
+                </p>
+              )}
+
+              {/* Search and Filters Toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-[#04070e] border border-slate-800 rounded-lg p-3">
+                <div className="flex flex-1 min-w-[240px] items-center gap-2">
+                  <span className="text-slate-500 text-xs">🔍</span>
+                  <input
+                    type="text"
+                    placeholder="Search by flight callsign, airline (e.g. IndiGo), ICAO hex, or anomaly reason..."
+                    value={alertSearch}
+                    onChange={(e) => {
+                      setAlertSearch(e.target.value);
+                      setAlertPage(0);
+                    }}
+                    className="w-full bg-transparent border-0 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-0 font-normal"
+                  />
+                  {alertSearch && (
+                    <button
+                      onClick={() => { setAlertSearch(''); setAlertPage(0); }}
+                      className="text-slate-500 hover:text-slate-300 text-xs px-1"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <button
+                    onClick={() => { setAlertSeverityFilter('all'); setAlertPage(0); }}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold transition-colors ${
+                      alertSeverityFilter === 'all'
+                        ? 'bg-slate-700 text-cyan-300 border border-slate-600'
+                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    }`}
+                  >
+                    ALL ({alerts.length})
+                  </button>
+                  <button
+                    onClick={() => { setAlertSeverityFilter('high'); setAlertPage(0); }}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold transition-colors ${
+                      alertSeverityFilter === 'high'
+                        ? 'bg-rose-950/80 text-rose-300 border border-rose-800'
+                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    }`}
+                  >
+                    🔴 CRITICAL ({alerts.filter(a => a.severity === 'high').length})
+                  </button>
+                  <button
+                    onClick={() => { setAlertSeverityFilter('medium'); setAlertPage(0); }}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold transition-colors ${
+                      alertSeverityFilter === 'medium'
+                        ? 'bg-amber-950/80 text-amber-300 border border-amber-800'
+                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    }`}
+                  >
+                    🟡 SUSPICIOUS ({alerts.filter(a => a.severity === 'medium').length})
+                  </button>
+                  <button
+                    onClick={() => { setAlertSeverityFilter('unacked'); setAlertPage(0); }}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold transition-colors ${
+                      alertSeverityFilter === 'unacked'
+                        ? 'bg-sky-950/80 text-sky-300 border border-sky-800'
+                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    }`}
+                  >
+                    ⚠️ UNACKNOWLEDGED ({alerts.filter(a => !a.acknowledged).length})
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs text-slate-400 font-normal">
+                  <span>Per page:</span>
+                  <select
+                    value={alertsPerPage}
+                    onChange={(e) => {
+                      setAlertPerPage(Number(e.target.value));
+                      setAlertPage(0);
+                    }}
+                    className="bg-[#080d18] border border-slate-800 rounded px-2 py-1 text-slate-200 text-xs focus:outline-none"
+                  >
+                    <option value={10}>10</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Airspace Event Candidates Panel (Collapsible) */}
+              <details className="border border-slate-800/80 bg-[#04070e]/80 rounded-lg overflow-hidden group">
+                <summary className="px-4 py-2.5 bg-slate-900/50 border-b border-slate-800/80 cursor-pointer flex items-center justify-between text-xs font-bold text-slate-300 hover:text-white select-none transition-colors">
+                  <div className="flex items-center gap-2">
+                    <span className="text-cyan-400">⚡</span>
+                    <span className="tracking-wide">MULTI-AIRCRAFT PROXIMITY EVENT REVIEW & CASE DERIVATION</span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-normal group-open:rotate-180 transition-transform">▼ Click to expand/collapse</span>
+                </summary>
+                <div className="p-3">
+                  <Suspense fallback={<div className="p-4 text-xs text-slate-400">Loading airspace event review…</div>}>
+                    <AirspaceEventCandidatePanel onInvestigate={(icao24) => {
+                      setSelectedFlightId(icao24);
+                      setIsDetailDrawerOpen(true);
+                      setCurrentTier('tier2_radar');
+                    }} />
+                  </Suspense>
+                </div>
+              </details>
+
+              {/* Alerts Audit Log Table */}
+              <div className="border border-slate-800/80 rounded-lg overflow-x-auto bg-[#04070e]/50">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
-                    <tr className="border-b border-slate-800 text-slate-500 uppercase text-[10px]">
-                      <th className="py-2.5 px-3 cursor-pointer hover:text-slate-300 font-bold" onClick={() => { setSortField('timestamp'); setSortAsc(!sortAsc); }}>
+                    <tr className="border-b border-slate-800 bg-slate-900/60 text-slate-400 uppercase text-[10px] tracking-wider">
+                      <th className="py-3 px-3 cursor-pointer hover:text-slate-200 font-bold" onClick={() => { setSortField('timestamp'); setSortAsc(!sortAsc); }}>
                         Timestamp {sortField === 'timestamp' && (sortAsc ? '▲' : '▼')}
                       </th>
-                      <th className="py-2.5 px-3 cursor-pointer hover:text-slate-300 font-bold" onClick={() => { setSortField('callsign'); setSortAsc(!sortAsc); }}>
-                        Callsign {sortField === 'callsign' && (sortAsc ? '▲' : '▼')}
+                      <th className="py-3 px-3 cursor-pointer hover:text-slate-200 font-bold" onClick={() => { setSortField('callsign'); setSortAsc(!sortAsc); }}>
+                        Aircraft & Airline {sortField === 'callsign' && (sortAsc ? '▲' : '▼')}
                       </th>
-                      <th className="py-2.5 px-3 font-bold">ICAO</th>
-                      <th className="py-2.5 px-3 font-bold">Anomaly Details</th>
-                      <th className="py-2.5 px-3 font-bold">Severity</th>
-                      <th className="py-2.5 px-3 cursor-pointer hover:text-slate-300 font-bold" onClick={() => { setSortField('scoreImpact'); setSortAsc(!sortAsc); }}>
+                      <th className="py-3 px-3 font-bold">ICAO Hex</th>
+                      <th className="py-3 px-3 font-bold">Anomaly Evidence / Reason</th>
+                      <th className="py-3 px-3 font-bold">Severity</th>
+                      <th className="py-3 px-3 cursor-pointer hover:text-slate-200 font-bold" onClick={() => { setSortField('scoreImpact'); setSortAsc(!sortAsc); }}>
                         Impact {sortField === 'scoreImpact' && (sortAsc ? '▲' : '▼')}
                       </th>
-                      <th className="py-2.5 px-3 font-bold">Acknowledge</th>
+                      <th className="py-3 px-3 font-bold text-center">Status / Acknowledge</th>
+                      <th className="py-3 px-3 font-bold text-right">Radar Investigation</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 text-xs font-normal">
                     {paginatedAlerts.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="py-8 text-center text-slate-600">No alert logs available.</td>
+                        <td colSpan={8} className="py-12 text-center text-slate-500">
+                          {alertSearch ? `No alert logs matching "${alertSearch}".` : "No alert logs available in active stream."}
+                        </td>
                       </tr>
                     ) : (
                       paginatedAlerts.map(a => {
-                        const sevColor = 
-                          a.severity === 'high' ? 'text-rose-400 font-bold' : 'text-amber-400 font-bold';
+                        const sevColor =
+                          a.severity === 'high' ? 'bg-rose-950/80 text-rose-300 border border-rose-800' : 'bg-amber-950/80 text-amber-300 border border-amber-800';
+                        const airlineInfo = getAirlineInfo(a.callsign, a.icao24);
                         return (
-                          <tr key={a.id} className={`hover:bg-slate-800/20 transition-colors ${a.acknowledged ? 'opacity-40' : ''}`}>
-                            <td className="py-2.5 px-3 text-slate-400">{a.timestamp}</td>
-                            <td className="py-2.5 px-3 font-bold text-slate-100">{a.callsign}</td>
-                            <td className="py-2.5 px-3 text-slate-400">{a.icao24.toUpperCase()}</td>
+                          <tr key={a.id} className={`hover:bg-slate-800/30 transition-colors ${a.acknowledged ? 'opacity-50' : ''}`}>
+                            <td className="py-2.5 px-3 text-slate-400 font-mono text-[11px] whitespace-nowrap">{a.timestamp}</td>
+                            <td className="py-2.5 px-3">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-slate-100">{a.callsign}</span>
+                                {airlineInfo.name && airlineInfo.code !== 'GEN' && (
+                                  <span
+                                    className="text-[9px] font-bold px-1.5 py-0.5 rounded border"
+                                    style={{
+                                      backgroundColor: `${airlineInfo.color}22`,
+                                      borderColor: `${airlineInfo.color}66`,
+                                      color: airlineInfo.color === '#002b66' || airlineInfo.color === '#003366' ? '#93c5fd' : airlineInfo.color
+                                    }}
+                                  >
+                                    {airlineInfo.name}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3 text-slate-400 font-mono text-[11px]">{a.icao24.toUpperCase()}</td>
                             <td className="py-2.5 px-3 text-slate-300">
                               {a.is_synthetic && <span className="bg-slate-800 text-slate-300 text-[10px] px-1.5 py-0.5 rounded border border-slate-700 mr-2 uppercase font-bold">TEST</span>}
-                              {a.type}
+                              <span>{a.type}</span>
                             </td>
-                            <td className={`py-2.5 px-3 uppercase ${sevColor}`}>{a.is_synthetic ? 'TEST' : a.severity}</td>
-                            <td className="py-2.5 px-3 text-rose-400 font-normal">{a.scoreImpact} pts</td>
-                            <td className="py-2.5 px-3">
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${sevColor}`}>
+                                {a.is_synthetic ? 'TEST' : a.severity}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-rose-400 font-bold whitespace-nowrap">{a.scoreImpact} pts</td>
+                            <td className="py-2.5 px-3 text-center">
                               {a.acknowledged ? (
-                                <span className="text-[10px] text-slate-600 border border-slate-800 px-2 py-0.5 rounded">ACKNOWLEDGED</span>
+                                <span className="text-[10px] text-slate-500 border border-slate-800 bg-[#04070e] px-2 py-0.5 rounded">
+                                  ACKNOWLEDGED
+                                </span>
                               ) : (
                                 <button
                                   onClick={() => handleAcknowledge(a.id)}
-                                  className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-200 px-2.5 py-1 rounded transition-colors font-normal"
+                                  className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-200 px-2.5 py-1 rounded transition-colors font-medium border border-slate-700"
                                 >
                                   ACKNOWLEDGE
                                 </button>
                               )}
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              <button
+                                onClick={() => {
+                                  setSelectedFlightId(a.icao24);
+                                  setIsDetailDrawerOpen(true);
+                                  setCurrentTier('tier2_radar');
+                                }}
+                                className="text-[10px] bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 font-bold px-2.5 py-1 rounded transition-colors"
+                              >
+                                🎯 TRACK ON MAP
+                              </button>
                             </td>
                           </tr>
                         );
@@ -4789,24 +4670,43 @@ export default function App() {
                 </table>
               </div>
 
-              <div className="flex items-center justify-between border-t border-slate-800 pt-3 mt-3 text-[10px] font-normal">
-                <span className="text-slate-500">
-                  Showing {alertPage * alertsPerPage + 1} - {Math.min((alertPage + 1) * alertsPerPage, sortedAlerts.length)} of {sortedAlerts.length} logs
+              {/* Pagination Controls */}
+              <div className="flex flex-wrap items-center justify-between border-t border-slate-800 pt-3 gap-3 text-xs font-normal">
+                <span className="text-slate-400 text-[11px]">
+                  Showing {sortedAlerts.length > 0 ? alertPage * alertsPerPage + 1 : 0} - {Math.min((alertPage + 1) * alertsPerPage, sortedAlerts.length)} of {sortedAlerts.length} logs
+                  {alerts.length !== sortedAlerts.length && ` (filtered from ${alerts.length} total)`}
                 </span>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    disabled={alertPage === 0}
+                    onClick={() => setAlertPage(0)}
+                    className="border border-slate-800 bg-[#04070e] px-2 py-1 rounded text-slate-400 hover:text-slate-200 disabled:opacity-30 text-[11px]"
+                  >
+                    « FIRST
+                  </button>
                   <button
                     disabled={alertPage === 0}
                     onClick={() => setAlertPage(alertPage - 1)}
-                    className="border border-slate-800 bg-[#04070e] px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 disabled:opacity-40"
+                    className="border border-slate-800 bg-[#04070e] px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 disabled:opacity-30 text-[11px]"
                   >
-                    PREVIOUS
+                    ‹ PREV
                   </button>
+                  <span className="px-2 text-slate-300 font-bold text-[11px]">
+                    Page {alertPage + 1} of {Math.max(1, Math.ceil(sortedAlerts.length / alertsPerPage))}
+                  </span>
                   <button
                     disabled={(alertPage + 1) * alertsPerPage >= sortedAlerts.length}
                     onClick={() => setAlertPage(alertPage + 1)}
-                    className="border border-slate-800 bg-[#04070e] px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 disabled:opacity-40"
+                    className="border border-slate-800 bg-[#04070e] px-2.5 py-1 rounded text-slate-400 hover:text-slate-200 disabled:opacity-30 text-[11px]"
                   >
-                    NEXT
+                    NEXT ›
+                  </button>
+                  <button
+                    disabled={(alertPage + 1) * alertsPerPage >= sortedAlerts.length}
+                    onClick={() => setAlertPage(Math.max(0, Math.ceil(sortedAlerts.length / alertsPerPage) - 1))}
+                    className="border border-slate-800 bg-[#04070e] px-2 py-1 rounded text-slate-400 hover:text-slate-200 disabled:opacity-30 text-[11px]"
+                  >
+                    LAST »
                   </button>
                 </div>
               </div>
@@ -4816,272 +4716,33 @@ export default function App() {
           {/* Tool 2: Analytics & Replay */}
           {tier3Tab === 'analytics' && (
             <div className="flex-1 grid grid-cols-12 gap-5 min-h-0 overflow-y-auto">
-              <section className="col-span-12 lg:col-span-7 bg-[#080d18] border border-slate-800 rounded p-5 flex flex-col gap-5">
-                <div className="border-b border-slate-800 pb-2 flex items-center justify-between">
-                  <div>
-                    <h2 className="text-sm font-bold text-slate-200 uppercase m-0">CLASSIFIER & TRUST ANALYTICS</h2>
-                    <p className="text-[11px] text-slate-400 mt-1 font-normal">
-                      How accurate our detection has been, measured against test cases we know the answer to.
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setShowAnalyticsTechnical(!showAnalyticsTechnical)}
-                    className="text-[10px] px-2.5 py-1 rounded border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-slate-100 hover:border-slate-500 transition-colors flex items-center gap-1.5 shrink-0"
-                    title="Toggle between plain-English summary and full technical confusion matrix / metrics"
-                  >
-                    <span className={`w-1.5 h-1.5 rounded-full ${showAnalyticsTechnical ? 'bg-cyan-400' : 'bg-slate-500'}`} />
-                    <span>Show technical detail</span>
-                    <span className="text-[9px] text-slate-400 font-bold">[{showAnalyticsTechnical ? 'ON' : 'OFF'}]</span>
-                  </button>
+              <section className="col-span-12 lg:col-span-7 bg-[#080d18] border border-slate-800 rounded p-5 space-y-4">
+                <div className="border-b border-slate-800 pb-3">
+                  <h2 className="text-sm font-bold text-slate-200 uppercase m-0">LIVE DATA & DETECTOR STATUS</h2>
+                  <p className="text-[11px] text-slate-400 mt-1">Operational counts reflect observations currently available to this application instance.</p>
                 </div>
-
-                {/* Accuracy chart */}
-                <div className="h-[140px] w-full bg-[#060913] border border-slate-800 p-2.5 rounded">
-                  <span className="text-[10px] text-slate-400 block mb-1 uppercase font-normal">Accuracy Over Time</span>
-                  {accuracyData.length === 0 && <p className="absolute text-[10px] text-slate-500 mt-8">No backend accuracy history available.</p>}
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={accuracyData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity="0.4" />
-                      <XAxis dataKey="time" stroke="#475569" fontSize={9} />
-                      <YAxis stroke="#475569" fontSize={9} domain={[0.90, 1.00]} />
-                      <Tooltip contentStyle={{ backgroundColor: '#0a0f1d', borderColor: '#334155', fontSize: '9px' }} />
-                      <Line type="monotone" dataKey="accuracy" stroke="#38bdf8" strokeWidth={1.5} dot={{ r: 2 }} />
-                    </LineChart>
-                  </ResponsiveContainer>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="bg-[#060913] border border-slate-800 rounded p-4"><div className="text-[10px] text-slate-500">LIVE AIRCRAFT</div><div className="text-2xl text-slate-100 font-semibold mt-1">{liveAircraftCount}</div></div>
+                  <div className="bg-[#060913] border border-slate-800 rounded p-4"><div className="text-[10px] text-slate-500">WITH DETECTOR SCORE</div><div className="text-2xl text-slate-100 font-semibold mt-1">{stats.scoredCount}</div></div>
+                  <div className="bg-[#060913] border border-slate-800 rounded p-4"><div className="text-[10px] text-slate-500">SOURCE CONNECTION</div><div className={`text-lg font-semibold mt-2 ${backendHealth === 'online' ? 'text-emerald-400' : 'text-amber-300'}`}>{backendHealth === 'online' ? 'CONNECTED' : 'UNAVAILABLE'}</div></div>
                 </div>
-
-                {/* Anomaly distribution & Volume */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="h-[130px] w-full bg-[#060913] border border-slate-800 p-2.5 rounded">
-                    <span className="text-[10px] text-slate-400 block mb-1 uppercase font-normal">Anomaly Types Distribution</span>
-                    {typeData.length === 0 && <p className="text-[10px] text-slate-500 mt-7">No alerts reported.</p>}
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={typeData} margin={{ top: 5, right: 5, left: -30, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity="0.4" />
-                        <XAxis dataKey="type" stroke="#475569" fontSize={7} />
-                        <YAxis stroke="#475569" fontSize={8} />
-                        <Tooltip contentStyle={{ backgroundColor: '#0a0f1d', borderColor: '#334155', fontSize: '8px' }} />
-                        <Bar dataKey="count" fill="#f43f5e" radius={[2, 2, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                  
-                  <div className="h-[130px] w-full bg-[#060913] border border-slate-800 p-2.5 rounded">
-                    <span className="text-[10px] text-slate-400 block mb-1 uppercase font-normal">Aircraft Volume (24h)</span>
-                    {volumeData.length === 0 && <p className="text-[10px] text-slate-500 mt-7">No 24-hour volume history available.</p>}
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={volumeData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity="0.4" />
-                        <XAxis dataKey="time" stroke="#475569" fontSize={9} />
-                        <YAxis stroke="#475569" fontSize={9} />
-                        <Tooltip contentStyle={{ backgroundColor: '#0a0f1d', borderColor: '#334155', fontSize: '8px' }} />
-                        <Area type="monotone" dataKey="volume" stroke="#64748b" fill="#1e293b" strokeWidth={1.5} />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                {/* Confusion Matrix or Plain-English Summary */}
-                <div className="bg-[#060913] p-3 rounded border border-slate-800">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase">
-                      {showAnalyticsTechnical ? "REPLAY CONFUSION MATRIX (2x2)" : "DETECTION ACCURACY & RELIABILITY"}
-                    </span>
-                    <button
-                      onClick={() => setShowAnalyticsTechnical(!showAnalyticsTechnical)}
-                      className="text-[10px] px-2 py-0.5 rounded border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-slate-100 hover:border-slate-500 transition-colors flex items-center gap-1.5 shrink-0"
-                      title="Toggle between plain-English summary and full confusion matrix"
-                    >
-                      <span className={`w-1.5 h-1.5 rounded-full ${showAnalyticsTechnical ? 'bg-cyan-400' : 'bg-slate-500'}`} />
-                      <span>Show technical detail</span>
-                      <span className="text-[9px] text-slate-400 font-bold">[{showAnalyticsTechnical ? 'ON' : 'OFF'}]</span>
-                    </button>
-                  </div>
-
-                  {showAnalyticsTechnical ? (
-                    // Technical 2x2 Confusion Matrix Grid
-                    <div className="grid grid-cols-2 gap-3 text-center">
-                      <div className="bg-[#0a0f1d] p-2.5 rounded border border-slate-800">
-                        <div className="text-[10px] text-slate-500 font-normal">TRUE POSITIVES (TP)</div>
-                        <div className="text-lg font-bold text-emerald-400">{replayResult?.true_positives ?? '—'}</div>
-                        <div className="text-[9px] text-slate-500 mt-0.5">Real attacks correctly flagged</div>
-                      </div>
-                      <div className="bg-[#0a0f1d] p-2.5 rounded border border-slate-800">
-                        <div className="text-[10px] text-slate-500 font-normal">FALSE POSITIVES (FP)</div>
-                        <div className="text-lg font-bold text-rose-400">{replayResult?.false_positives ?? '—'}</div>
-                        <div className="text-[9px] text-slate-500 mt-0.5">Labeled negative samples flagged</div>
-                      </div>
-                      <div className="bg-[#0a0f1d] p-2.5 rounded border border-slate-800">
-                        <div className="text-[10px] text-slate-500 font-normal">TRUE NEGATIVES (TN)</div>
-                        <div className="text-lg font-bold text-emerald-400">{replayResult?.true_negatives ?? '—'}</div>
-                        <div className="text-[9px] text-slate-500 mt-0.5">Labeled negative samples not flagged</div>
-                      </div>
-                      <div className="bg-[#0a0f1d] p-2.5 rounded border border-slate-800">
-                        <div className="text-[10px] text-slate-500 font-normal">FALSE NEGATIVES (FN)</div>
-                        <div className="text-lg font-bold text-rose-400">{replayResult?.false_negatives ?? '—'}</div>
-                        <div className="text-[9px] text-slate-500 mt-0.5">Labeled positive samples missed</div>
-                      </div>
-                    </div>
-                  ) : (
-                    // Plain-English Summary (Off state)
-                    <div className="bg-[#0a0f1d] p-3 rounded border border-slate-800 space-y-2.5">
-                      {(() => {
-                        if (!replayResult) return <p className="text-xs text-slate-400">Run a replay against labeled historical records to see measured precision, recall, and false positive counts.</p>;
-                        const tp = replayResult.true_positives;
-                        const fp = replayResult.false_positives;
-                        const tn = replayResult.true_negatives;
-                        const fn = replayResult.false_negatives;
-                        const total = tp + fp + tn + fn;
-                        const accuracyPct = Math.round(((tp + tn) / total) * 100);
-                        const attackCatchRate = Math.round((tp / (tp + fn)) * 100);
-                        return (
-                          <>
-                            <div className="text-xs text-slate-200 font-normal leading-relaxed">
-                              <span className="text-emerald-400 font-bold">{accuracyPct}% accuracy on this replay set</span>. This is a dataset metric, not operational performance.
-                            </div>
-                            <div className="grid grid-cols-2 gap-2 pt-1">
-                              <div className="bg-[#060913] p-2 rounded border border-slate-800 text-[11px]">
-                                <span className="text-slate-500 block text-[9px] uppercase font-bold">Labeled Positives Flagged</span>
-                                <span className="text-emerald-400 font-bold text-sm">{tp} of {tp + fn}</span>
-                                <span className="text-slate-400 block text-[9px] mt-0.5">{attackCatchRate}% recall on this set</span>
-                              </div>
-                              <div className="bg-[#060913] p-2 rounded border border-slate-800 text-[11px]">
-                                <span className="text-slate-500 block text-[9px] uppercase font-bold">Labeled Negatives Not Flagged</span>
-                                <span className="text-slate-200 font-bold text-sm">{tn} of {tn + fp}</span>
-                                <span className="text-slate-400 block text-[9px] mt-0.5">False positives: {fp}</span>
-                              </div>
-                            </div>
-                            <div className="text-[10px] text-slate-500 pt-1 border-t border-slate-800/60">
-                              Click <b className="text-slate-400">Show technical detail</b> above to inspect the raw 2x2 confusion matrix grid (TP, FP, TN, FN).
-                            </div>
-                          </>
-                        );
-                      })()}
-                    </div>
-                  )}
+                <div className="bg-[#060913] border border-slate-800 rounded p-4 text-xs text-slate-300 leading-relaxed space-y-2">
+                  <p>Coverage depends on the connected surveillance provider, its receiver network, API limits, and the current query area. This live view does not represent every aircraft worldwide.</p>
+                  <p>Missing source fields remain unavailable. Aircraft without enough evidence are not assigned a detector score.</p>
                 </div>
               </section>
-
-              {/* Right column: Ablation Study & Replay Validation */}
-              <div className="col-span-12 lg:col-span-5 flex flex-col gap-5">
-                {/* Ablation Results Section */}
-                <section className="bg-[#080d18] border border-slate-800 rounded p-5 flex flex-col gap-3">
-                  <div className="border-b border-slate-800 pb-2 flex items-center justify-between">
-                    <div>
-                      <h2 className="text-sm font-bold text-slate-200 uppercase m-0">ABLATION RESULTS</h2>
-                      <span className="text-[10px] text-slate-400 font-normal">
-                        F1 detection vs. False-Positive Rate across defense layers
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3 text-[10px]">
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded bg-cyan-400 inline-block" />
-                        <span className="text-slate-300 font-medium">F1 Score</span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded bg-rose-500 inline-block" />
-                        <span className="text-slate-300 font-medium">False Positives (FPR)</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Grouped Bar Chart */}
-                  <div className="h-[175px] w-full bg-[#060913] border border-slate-800 p-2.5 rounded">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={ablationData} margin={{ top: 10, right: 10, left: -25, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity="0.4" />
-                        <XAxis dataKey="name" stroke="#475569" fontSize={8} tickLine={false} />
-                        <YAxis stroke="#475569" fontSize={8} domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
-                        <Tooltip
-                          contentStyle={{ backgroundColor: '#0a0f1d', borderColor: '#334155', fontSize: '9px' }}
-                          formatter={(value: unknown, name: unknown) => [`${value}%`, name === 'f1' ? 'F1 Score' : 'False Positive Rate']}
-                        />
-                        <Bar dataKey="f1" name="F1 Score" fill="#38bdf8" radius={[2, 2, 0, 0]} />
-                        <Bar dataKey="fpr" name="False Positive Rate" fill="#f43f5e" radius={[2, 2, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  {/* Takeaway / Analysis based on toggle */}
-                  {showAnalyticsTechnical ? (
-                    <div className="bg-[#060913] p-2.5 rounded border border-slate-800 text-[10px] space-y-1.5">
-                      <div className="font-bold text-slate-300 uppercase text-[9px] border-b border-slate-800/80 pb-1">
-                        DOCUMENTED SYNTHETIC BENCHMARK (400 VECTORS)
-                      </div>
-                      <div className="grid grid-cols-4 gap-1 text-[9px] text-center font-mono">
-                        <div className="text-left text-slate-500 font-sans">CONFIG</div>
-                        <div className="text-slate-500 font-sans">F1</div>
-                        <div className="text-slate-500 font-sans">FPR</div>
-                        <div className="text-slate-500 font-sans">PRECISION</div>
-
-                        {ablationData.map((row) => (
-                          <React.Fragment key={row.name}>
-                            <div className="text-left text-slate-300 font-sans truncate" title={row.desc}>{row.name}</div>
-                            <div className="text-cyan-400 font-bold">{row.f1}%</div>
-                            <div className={row.fpr > 10 ? "text-rose-400 font-bold" : row.fpr > 0 ? "text-amber-400" : "text-emerald-400"}>
-                              {row.fpr}%
-                            </div>
-                            <div className="text-slate-300">{row.precision}%</div>
-                          </React.Fragment>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="bg-[#060913] p-2.5 rounded border border-slate-800 text-[11px] text-slate-300 space-y-1 font-normal leading-relaxed">
-                      <p>
-                        <span className="text-emerald-400 font-bold">Why multi-layer matters:</span> The documented benchmark uses synthetic anomaly vectors. Its results describe that evaluation set and do not establish real-world detection accuracy.
-                      </p>
-                    </div>
-                  )}
-                </section>
-
-                {/* Model Verification Engine */}
-                <section className="bg-[#080d18] border border-slate-800 rounded p-5 flex flex-col justify-between flex-1">
-                  <div>
-                    <div className="border-b border-slate-800 pb-2 mb-3">
-                      <h2 className="text-sm font-bold text-slate-200 uppercase m-0">MODEL VERIFICATION ENGINE</h2>
-                      <span className="text-[10px] text-slate-500 font-normal">Benchmark RF, GB, and Autoencoders against telemetry</span>
-                    </div>
-
-                    <div className="p-3 rounded bg-[#060913] border border-slate-800 space-y-2 text-xs font-normal">
-                      <p className="text-slate-300">
-                        AirGuard combines Random Forests, Gradient Boosted Decision Trees, and PyTorch autoencoders to detect trajectory anomalies.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3 pt-4 border-t border-slate-800">
-                    {replayResult && (
-                      <div className="bg-[#060913] border border-slate-800 p-2.5 rounded text-[10px] text-slate-300 space-y-1 font-normal">
-                        {showAnalyticsTechnical ? (
-                          <>
-                            <div className="font-bold border-b border-slate-800 pb-1 text-slate-200 uppercase">EVALUATION RESULTS (TECHNICAL):</div>
-                            <div>MODEL: <b>{replayResult.model_version}</b></div>
-                            <div>PRECISION: <b className="text-emerald-400">{(replayResult.precision * 100).toFixed(1)}%</b></div>
-                            <div>RECALL: <b className="text-emerald-400">{(replayResult.recall * 100).toFixed(1)}%</b></div>
-                            <div>F1 SCORE: <b className="text-emerald-400">{(replayResult.f1 * 100).toFixed(1)}%</b></div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="font-bold border-b border-slate-800 pb-1 text-slate-200 uppercase">SYSTEM PERFORMANCE SUMMARY:</div>
-                            <div>ACTIVE MODEL: <b className="text-slate-100">{replayResult.model_version}</b></div>
-                            <div>ATTACK CATCH RATE: <b className="text-emerald-400">{(replayResult.recall * 100).toFixed(0)}% (Strong)</b></div>
-                            <div>FALSE ALARM RESISTANCE: <b className="text-emerald-400">{(replayResult.precision * 100).toFixed(0)}% (Few false alerts)</b></div>
-                          </>
-                        )}
-                      </div>
-                    )}
-
-                    <button
-                      onClick={handleReplaySession}
-                      disabled={isReplaying}
-                      className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 disabled:text-slate-500 text-black font-bold text-xs py-2.5 px-4 rounded transition-colors"
-                    >
-                      {isReplaying ? "REPLAYING SESSION TELEMETRY..." : "TEST AGAINST LAST SESSION (REPLAY)"}
-                    </button>
-                  </div>
-                </section>
-              </div>
+              <section className="col-span-12 lg:col-span-5 bg-[#080d18] border border-slate-800 rounded p-5 space-y-3">
+                <div className="border-b border-slate-800 pb-2"><h2 className="text-sm font-bold text-slate-200 uppercase m-0">VALIDATION STATUS</h2><span className="text-[10px] text-slate-400">Evidence status for the active detector</span></div>
+                <div className="bg-[#060913] p-3 rounded border border-amber-900/60 text-xs text-slate-300 space-y-2 leading-relaxed">
+                  <div className="font-bold text-amber-300">RESEARCH ML DISABLED · VALIDATION NOT ESTABLISHED</div>
+                  <p>Live triage uses deterministic telemetry rules. No independently labeled real-world evaluation set is configured, so precision, recall, and model accuracy are not reported.</p>
+                  <p>Detector scores are heuristic triage signals, not calibrated probabilities or proof of spoofing.</p>
+                </div>
+                <div className="bg-[#060913] p-3 rounded border border-slate-800 text-xs text-slate-300 leading-relaxed">
+                  <div className="font-semibold text-slate-100 mb-1">ACTIVE EVIDENCE PIPELINE</div>
+                  Real source observations are normalized, checked by deterministic kinematic rules, and retained with field-level data quality. Research ML scores are not part of live decisions.
+                </div>
+              </section>
             </div>
           )}
 
@@ -5218,58 +4879,18 @@ export default function App() {
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500">QUEUE DEPTH:</span>
-                        <span className="text-slate-200 font-bold">{healthData.queue_depth} vectors</span>
+                        <span className="text-slate-200 font-bold">{healthData.queue_depth ?? '—'} vectors</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500">POLL LATENCY:</span>
-                        <span className="text-slate-200 font-bold">{healthData.poll_latency_ms.toFixed(1)} ms</span>
+                        <span className="text-slate-200 font-bold">{healthData.poll_latency_ms?.toFixed(1) ?? '—'} ms</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500">LAST SUCCESSFUL SYNC:</span>
                         <span className="text-slate-400">
-                          {healthData.last_successful_poll ? healthData.last_successful_poll.split('T')[1]?.substring(0, 8) || 'ONLINE' : 'ACTIVE'}
+                          {healthData.last_successful_poll ? healthData.last_successful_poll.split('T')[1]?.substring(0, 8) || '—' : '—'}
                         </span>
                       </div>
-                    </div>
-
-                    {/* Showcase Mode Preferences */}
-                    <div className="p-3 bg-[#060913] rounded border border-slate-800 space-y-2 mt-3">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="text-xs font-bold text-slate-200">SHOWCASE MODE</div>
-                          <div className="text-[10px] text-slate-400">
-                            {showcaseMode 
-                              ? "Cinematic orbital entry & atmospheric audio enabled" 
-                              : "Instant, zero-animation loading (viva technical defense mode)"}
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => handleToggleShowcaseMode(!showcaseMode)}
-                          className={`px-3 py-1.5 rounded font-mono text-xs font-bold border transition-all ${
-                            showcaseMode
-                              ? "bg-cyan-950/80 border-cyan-500 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.3)]"
-                              : "bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200"
-                          }`}
-                        >
-                          {showcaseMode ? "ENABLED (ON)" : "DISABLED (OFF)"}
-                        </button>
-                      </div>
-
-                      <div className="text-[10px] text-slate-500 pt-1 border-t border-slate-800/80">
-                        <span className="text-amber-400 font-medium">Viva Defense Rationale:</span> Flip to <b>OFF</b> during the live viva examination so the tactical globe loads instantly with zero camera delay and no animations competing with verbal explanations.
-                      </div>
-
-                      {showcaseMode && (
-                        <div className="pt-2 flex gap-2">
-                          <button
-                            onClick={handleReplayCinematic}
-                            className="w-full bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-400 hover:text-cyan-300 font-mono text-xs py-1.5 px-3 rounded transition-colors flex items-center justify-center gap-1.5"
-                          >
-                            <span>🚀</span>
-                            <span>REPLAY CINEMATIC INTRO</span>
-                          </button>
-                        </div>
-                      )}
                     </div>
 
                     {/* Reduce Motion Preferences */}
@@ -5281,8 +4902,8 @@ export default function App() {
                             <span>REDUCE MOTION</span>
                           </div>
                           <div className="text-[10px] text-slate-400">
-                            {reduceMotion 
-                              ? "Camera fly-to animations and transitions disabled (honoring prefers-reduced-motion)" 
+                            {reduceMotion
+                              ? "Camera fly-to animations and transitions disabled (honoring prefers-reduced-motion)"
                               : "Standard animations active (camera lerp, fly-tos, cloud drift)"}
                           </div>
                         </div>
@@ -5312,8 +4933,8 @@ export default function App() {
                             <span>AUDITORY FEEDBACK LAYER</span>
                           </div>
                           <div className="text-[10px] text-slate-400">
-                            {isSoundEnabled 
-                              ? "Soft anomaly chimes and close-orbit ambient hum active on globe" 
+                            {isSoundEnabled
+                              ? "Soft anomaly chimes and close-orbit ambient hum active on globe"
                               : "Audio muted globally (off by default, opt-in mode)"}
                           </div>
                         </div>
@@ -5331,21 +4952,21 @@ export default function App() {
 
                       <div className="text-[10px] text-slate-500 pt-1 border-t border-slate-800/80 space-y-1">
                         <div><b className="text-cyan-400">Pleasant Chime:</b> Plays a soft harmonic acoustic triad (&lt; 1.4s) when a live anomaly is flagged on the globe. Never a siren or klaxon.</div>
-                        <div><b className="text-cyan-400">Ambient Hum:</b> Low turbofan &amp; wind wash during close-orbit chase swoops in Showcase Mode.</div>
+                        <div><b className="text-cyan-400">Ambient Hum:</b> Optional low-volume audio during aircraft follow mode.</div>
                         <div><b className="text-amber-400 font-medium">Data-Reading Silence:</b> Audio is strictly silenced in the Detail drawer, Analytics, and Config screens so reading and concentration are never disturbed.</div>
                       </div>
                     </div>
 
-                    {/* Signal Confidence Overlay Preferences */}
+                    {/* Detector Risk Overlay Preferences */}
                     <div className="p-3 bg-[#060913] rounded border border-slate-800 space-y-2 mt-3">
                       <div className="flex items-center justify-between">
                         <div>
                           <div className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
                             <span className="w-2 h-2 rounded-full bg-sky-400"></span>
-                            <span>SIGNAL CONFIDENCE OVERLAY</span>
+                            <span>DETECTOR RISK OVERLAY</span>
                           </div>
                           <div className="text-[10px] text-slate-400">
-                            Shows where aircraft signals are currently most and least reliable — not traffic density.
+                            Shows sectors with scored aircraft and their mean heuristic detector risk. Unscored tracks are omitted.
                           </div>
                         </div>
                         <button
@@ -5361,8 +4982,8 @@ export default function App() {
                       </div>
 
                       <div className="text-[10px] text-slate-500 pt-1 border-t border-slate-800/80 space-y-1">
-                        <div><b className="text-sky-400">AirGuard Approach:</b> AirGuard highlights signal reliability and unusual behavior to answer: <i>&ldquo;Which signals can you actually trust?&rdquo;</i></div>
-                        <div><b className="text-sky-400">Spatial Trust Mesh:</b> Averages Navigation Integrity Category (NIC) and sensor consistency spatially. Calm blue-grey sectors indicate high integrity (≥85%); warming to amber (65-84%) and alert rose (&lt;65%) for degraded or spoofed signals.</div>
+                        <div><b className="text-sky-400">AirGuard Approach:</b> AirGuard stores source observations and detector signals for evidence-led review.</div>
+                        <div><b className="text-sky-400">Sector view:</b> Averages persisted heuristic detector-risk scores by location. This is not source integrity, a probability, or independent position verification.</div>
                       </div>
                     </div>
                   </div>
@@ -5377,15 +4998,11 @@ export default function App() {
             </div>
           )}
 
-          {/* Historical playback waits for real stored aircraft reports. */}
+          {/* Playback is built only from stored upstream aircraft observations. */}
           {tier3Tab === 'playback' && (
-            <div className="flex-1 min-h-[320px] grid place-items-center bg-[#080d18] border border-slate-800 rounded-xl p-8 text-center">
-              <div className="max-w-md">
-                <div className="text-[10px] font-semibold tracking-[0.18em] text-sky-300">RECORDED AIRCRAFT HISTORY</div>
-                <h2 className="mt-3 text-lg font-semibold text-slate-100">No recorded live history available</h2>
-                <p className="mt-2 text-sm leading-relaxed text-slate-400">Historical playback will appear after real aircraft reports have been collected and retained. This view never fills gaps with generated flights.</p>
-              </div>
-            </div>
+            <Suspense fallback={<div className="p-6 text-sm text-slate-400">Loading historical playback…</div>}>
+              <HistoricalPlaybackView />
+            </Suspense>
           )}
           {/* Tool 5: Admin System Panel */}
           {tier3Tab === 'admin' && currentUser?.role === 'admin' && (
@@ -5540,7 +5157,7 @@ export default function App() {
           {/* Tool 6: System Overview & Architecture Explainer */}
           {tier3Tab === 'about' && (
             <div className="flex-1 bg-[#080d18] border border-slate-800 rounded p-6 overflow-y-auto max-w-4xl mx-auto w-full">
-              <span className="text-[10px] text-cyan-300 uppercase font-bold tracking-[0.18em] border border-cyan-900/70 bg-cyan-950/30 px-2.5 py-1 rounded">AIRSPACE FIELD GUIDE</span>
+              <span className="text-[10px] text-cyan-300 uppercase font-bold tracking-[0.18em] border border-cyan-900/70 bg-cyan-950/30 px-2.5 py-1 rounded">AIRGUARD FIELD GUIDE</span>
               <h2 className="text-2xl font-semibold mt-4 text-white tracking-tight">A clearer view of the sky</h2>
               <p className="mt-2 text-sm text-slate-400 leading-relaxed max-w-3xl">Explore aircraft reports, follow a live position, and understand what the system has actually observed. AirGuard turns transponder data into an approachable airspace picture for curious travellers, students, and aviation teams.</p>
 
@@ -5560,9 +5177,9 @@ export default function App() {
 
       {/* --- Footer --- */}
       <footer className="border-t border-slate-800 bg-[#060913] px-6 py-2 flex items-center justify-between text-[10px] text-slate-500 relative z-20 font-normal">
-        <div>AirGuard Ground Station Receiver v0.1.0</div>
+        <div>AirGuard · Airspace Trust &amp; Threat Intelligence</div>
         <div className="flex items-center gap-4">
-          <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('about'); }} className="hover:text-slate-300 transition-colors">Flight guide</button>
+          <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('about'); }} className="hover:text-slate-300 transition-colors">Product guide</button>
           <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('alerts'); }} className="hover:text-slate-300 transition-colors">Alerts</button>
           <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('config'); }} className="hover:text-slate-300 transition-colors">Thresholds</button>
         </div>

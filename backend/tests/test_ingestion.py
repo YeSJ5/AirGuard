@@ -2,10 +2,12 @@ import os
 import json
 import pytest
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 import httpx
 
 from app.ingestion.service import OpenSkyIngestionService, CircuitBreakerOpenException
+from app.ingestion.sources import OpenSkyStateVectorSource
 
 # Load fixture
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures/opensky_fixture.json")
@@ -79,30 +81,27 @@ async def test_circuit_breaker_and_backoff():
         cooldown_seconds=1.0
     )
     
-    # Mock httpx GET call
-    mock_get = AsyncMock()
-    service.client.get = mock_get
+    # Mock the underlying HTTP request used by the OpenSky source adapter.
+    mock_request = AsyncMock()
+    service.client.request = mock_request
     
     # Step 1: Simulate 1st failure (consecutive_failures=1, backoff 2^1 = 2s)
-    mock_get.side_effect = httpx.ConnectError("Connection timed out")
-    with pytest.raises(httpx.ConnectError):
-        await service.poll_api()
+    mock_request.side_effect = httpx.ConnectError("Connection timed out")
+    assert await service.poll_api() is None
         
     assert service.consecutive_failures == 1
     assert service.breaker_state == "CLOSED"
     assert service.backoff_seconds == 2.0
 
     # Step 2: Simulate 2nd failure (backoff 2^2 = 4s)
-    with pytest.raises(httpx.ConnectError):
-        await service.poll_api()
+    assert await service.poll_api() is None
         
     assert service.consecutive_failures == 2
     assert service.breaker_state == "CLOSED"
     assert service.backoff_seconds == 4.0
 
     # Step 3: Simulate 3rd failure (consecutive_failures=3 reaches max_retries=3 -> TRIPS BREAKER TO OPEN)
-    with pytest.raises(httpx.ConnectError):
-        await service.poll_api()
+    assert await service.poll_api() is None
         
     assert service.consecutive_failures == 3
     assert service.breaker_state == "OPEN"
@@ -123,12 +122,101 @@ async def test_circuit_breaker_and_backoff():
     mock_res.json.return_value = {"states": [
         ["a1b2c3", "UAL824", "USA", 1722784490, 1722784495, -122.4194, 37.7749, 10000.0, False, 250.0, 180.0, 0.0, None, 10100.0, "1200", False, 0]
     ]}
-    mock_get.side_effect = None
-    mock_get.return_value = mock_res
+    mock_request.side_effect = None
+    mock_request.return_value = mock_res
     
     states = await service.poll_api()
     assert len(states) == 1
+    assert states[0]["icao24"] == "a1b2c3"
     
     # Breaker should recover to CLOSED and consecutive_failures resets
     assert service.breaker_state == "CLOSED"
     assert service.consecutive_failures == 0
+
+
+def test_opensky_snapshot_shape_distinguishes_empty_from_invalid():
+    assert OpenSkyStateVectorSource.decode({"states": None}) == []
+    assert OpenSkyStateVectorSource.decode({"states": []}) == []
+    with pytest.raises(ValueError, match="missing the required states field"):
+        OpenSkyStateVectorSource.decode({"time": 123})
+    with pytest.raises(ValueError, match="unexpected states shape"):
+        OpenSkyStateVectorSource.decode({"states": "not-a-list"})
+
+
+@pytest.mark.asyncio
+async def test_valid_empty_poll_replaces_snapshot(monkeypatch):
+    service = OpenSkyIngestionService(queue=asyncio.Queue(), db_session_maker=MagicMock())
+    response = MagicMock(status_code=200, headers={"x-rate-limit-remaining": "42"})
+    source = MagicMock(name="test_feed")
+    source.name = "test_feed"
+    source.fetch = AsyncMock(return_value=(response, []))
+    service.source_adapter = source
+    service.last_valid_snapshot = [{"icao24": "abc123"}]
+    service._broadcast_refresh_state = AsyncMock()
+
+    from app.core.redis import redis_client
+    from app.api.v1 import endpoints
+    monkeypatch.setattr(redis_client, "ping", AsyncMock(return_value=True))
+    monkeypatch.setattr(endpoints, "invalidate_snapshot_cache", AsyncMock())
+
+    assert await service.run_single_poll_cycle() == 0
+    assert service.last_valid_snapshot == []
+    assert service.last_successful_update is not None
+    assert service.current_source_status == "FRESH"
+    await service.client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_poll_retains_last_valid_snapshot():
+    service = OpenSkyIngestionService(queue=asyncio.Queue(), db_session_maker=MagicMock())
+    source = MagicMock(name="test_feed")
+    source.name = "test_feed"
+    source.fetch = AsyncMock(side_effect=httpx.ConnectError("temporary outage"))
+    service.source_adapter = source
+    previous_snapshot = [{"icao24": "abc123"}]
+    service.last_valid_snapshot = previous_snapshot
+    service._broadcast_refresh_state = AsyncMock()
+
+    assert await service.run_single_poll_cycle() == 1
+    assert service.last_valid_snapshot is previous_snapshot
+    assert service.current_source_status == "UNAVAILABLE"
+    assert service.last_error
+    assert service.next_attempt_at is not None
+    await service.client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retry_after_controls_next_attempt_and_preserves_snapshot():
+    service = OpenSkyIngestionService(queue=asyncio.Queue(), db_session_maker=MagicMock())
+    response = MagicMock(status_code=429, headers={"retry-after": "120"}, text="rate limited")
+    source = MagicMock(name="test_feed")
+    source.name = "test_feed"
+    source.fetch = AsyncMock(return_value=(response, []))
+    service.source_adapter = source
+    previous_snapshot = [{"icao24": "abc123"}]
+    service.last_valid_snapshot = previous_snapshot
+    service._broadcast_refresh_state = AsyncMock()
+
+    assert await service.poll_api() is None
+    assert service.last_valid_snapshot is previous_snapshot
+    assert service.current_source_status == "RATE_LIMITED"
+    assert service.retry_after_until is not None
+    assert service.next_attempt_at == service.retry_after_until
+    assert service.cooldown_until == service.retry_after_until.timestamp()
+    await service.client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_manual_refresh_is_queued_without_bypassing_retry_deadline():
+    service = OpenSkyIngestionService(queue=asyncio.Queue(), db_session_maker=MagicMock())
+    service.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=15)
+    service._broadcast_refresh_state = AsyncMock()
+
+    result = await service.request_manual_refresh()
+    assert result["accepted"] is True
+    assert result["queued"] is True
+    assert service.next_attempt_at > datetime.now(timezone.utc)
+    assert service.manual_refresh_requested is True
+    duplicate = await service.request_manual_refresh()
+    assert duplicate["accepted"] is False
+    await service.client.aclose()

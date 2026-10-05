@@ -14,6 +14,7 @@ async def test_detection_service_integration():
     # 1. Mock DB Session Maker
     db_session = MagicMock()
     async_db_session = AsyncMock()
+    async_db_session.add = MagicMock()
     db_session.return_value = async_db_session
     
     async_db_session.commit = AsyncMock()
@@ -128,10 +129,96 @@ async def test_detection_service_integration():
         assert len(alerts_added_mil) == 0, "Alert was incorrectly written to database for suppressed entity"
 
         # Assert correct suppression logging
-        log_payloads_mil = [json.loads(args[0]) for args, _ in mock_logger.info.call_args_list if args and args[0].startswith('{')]
+        # Per-track suppression decisions are intentionally DEBUG to keep live
+        # global-feed polling from emitting one INFO record per aircraft.
+        log_payloads_mil = [json.loads(args[0]) for args, _ in mock_logger.debug.call_args_list if args and args[0].startswith('{')]
         suppressed_log = next((p for p in log_payloads_mil if p.get("event") == "AUDIT_DECISION_SUPPRESSED"), None)
         
         assert suppressed_log is not None
         assert suppressed_log["payload"]["icao24"] == "d81234"
         assert suppressed_log["payload"]["is_known_entity"] is True
         assert suppressed_log["payload"]["known_entity_label"] == "MILITARY_F35"
+
+
+@pytest.mark.asyncio
+async def test_detection_scoring_pipeline_end_to_end():
+    """Verifies that 5 observations of normal telemetry produce legitimate combined risk,
+    canonical trust score, evidence confidence, and persisted Assessment signals without NIC."""
+    queue = asyncio.Queue()
+    
+    db_session = MagicMock()
+    async_db_session = AsyncMock()
+    async_db_session.add = MagicMock()
+    db_session.return_value = async_db_session
+    async_db_session.commit = AsyncMock()
+    async_db_session.refresh = AsyncMock()
+    async_db_session.__aenter__.return_value = async_db_session
+
+    ensemble = MagicMock()
+    # Ensemble cannot run without all features (returns None or raises)
+    ensemble.predict_anomaly.return_value = (None, {})
+    
+    autoencoder = MagicMock()
+    # Autoencoder produces 0.05 anomaly score for normal rolling kinematics
+    autoencoder.compute_anomaly_score.return_value = 0.05
+
+    service = DetectionService(
+        queue=queue,
+        db_session_maker=db_session,
+        ensemble_model=ensemble,
+        autoencoder_model=autoencoder,
+        rule_config=RuleConfig()
+    )
+
+    base_time = datetime(2026, 10, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assessments_added = []
+
+    # Send 5 sequential normal reports for aircraft "800abc" (e.g. steady cruise at 250 m/s, 10,000m)
+    for i in range(5):
+        record = {
+            "icao24": "800abc",
+            "callsign": "AIC101",
+            "latitude": 28.5 + (i * 0.01),
+            "longitude": 77.1 + (i * 0.01),
+            "altitude_m": 10000.0,
+            "velocity_ms": 250.0,
+            "heading_deg": 45.0,
+            "vertical_rate_ms": 0.0,
+            "on_ground": False,
+            "received_at": base_time + timedelta(seconds=i * 10),
+            "source": "opensky",
+            "metadata": {"is_known_entity": False, "known_entity_label": None}
+        }
+        await service.process_record(record)
+
+    # Collect all AircraftAssessment objects added to the DB session
+    added_objects = [args[0] for args, _ in async_db_session.add.call_args_list]
+    assessments_added = [obj for obj in added_objects if obj.__class__.__name__ == "AircraftAssessment"]
+    
+    assert len(assessments_added) == 5
+    latest_assessment = assessments_added[-1]
+    
+    # Verify canonical assessment fields
+    assert latest_assessment.icao24 == "800abc"
+    assert latest_assessment.combined_risk_score is not None
+    # Risk should be very low (0.021 = autoencoder 0.05 * 0.30 / 0.70 available weight)
+    assert 0.0 <= latest_assessment.combined_risk_score <= 0.10
+    
+    # Verify signals dictionary
+    signals = latest_assessment.signals
+    assert signals is not None
+    assert "trust_score" in signals
+    assert signals["trust_score"] is not None
+    assert 90.0 <= signals["trust_score"] <= 100.0
+    # Canonical relationship: trust = clamp((1 - combined_risk) * 100, 0, 100)
+    expected_trust = round((1.0 - latest_assessment.combined_risk_score) * 100, 2)
+    assert abs(signals["trust_score"] - expected_trust) < 0.1
+    
+    # Evidence confidence should reflect rules + autoencoder (0.40 + 0.30 = 0.70)
+    assert signals["evidence_confidence"] == 0.70
+    assert latest_assessment.assessment_status in ("PARTIALLY_ASSESSED", "ASSESSED")
+    
+    # Unavailable reasons should clearly explain missing ensemble and receiver evidence
+    assert any("Ensemble" in r for r in signals["unavailable_reasons"])
+    assert any("receiver" in r.lower() for r in signals["unavailable_reasons"])
+

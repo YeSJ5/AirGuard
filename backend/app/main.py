@@ -2,6 +2,11 @@ import os
 import sys
 import logging
 import asyncio
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request, Response
@@ -15,7 +20,8 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from app.core.config import settings
 from app.core.limiter import limiter
 from app.ingestion.service import OpenSkyIngestionService
-from app.core.database import async_session_maker
+from app.ingestion.opensky_auth import opensky_auth
+from app.core.database import async_session_maker, engine
 from app.core.redis import redis_client
 
 # 1. Custom JSON Log Formatter with OTel Trace Correlation IDs
@@ -48,7 +54,7 @@ async def lifespan(app: FastAPI):
     import app.api.v1.endpoints as endpoints_mod
 
     logger.info("Initializing ML models for in-process detection engine...")
-    ensemble = TrustScoringEnsemble()
+    ensemble = TrustScoringEnsemble(load_artifact=settings.ENABLE_LIVE_ML)
     autoencoder = UnsupervisedAutoencoder()
     detection_service = DetectionService(
         db_session_maker=async_session_maker,
@@ -64,14 +70,17 @@ async def lifespan(app: FastAPI):
     detection_service.route_service = route_service
 
     # Instantiate Ingestion Service with in-process detection engine and route service
-    has_opensky_credentials = bool(settings.OPENSKY_USERNAME and settings.OPENSKY_PASSWORD)
-    poll_interval_seconds = settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if has_opensky_credentials else 900.0)
+    poll_interval_seconds = settings.OPENSKY_POLL_INTERVAL_SECONDS or (90.0 if opensky_auth.configured else 900.0)
     ingestion_service = OpenSkyIngestionService(
         db_session_maker=async_session_maker,
         poll_interval_seconds=poll_interval_seconds,
         detection_service=detection_service,
         route_service=route_service
     )
+    endpoints_mod.active_ingestion_service = ingestion_service
+    from app.api.v1.endpoints import SYSTEM_STATS
+    SYSTEM_STATS["source_name"] = ingestion_service.source_adapter.name
+    SYSTEM_STATS["refresh_interval_seconds"] = ingestion_service.poll_interval
     
     # 1. Redis PubSub WebSocket Sync Listener
     from app.api.v1.endpoints import manager, websocket_pubsub_listener
@@ -87,23 +96,43 @@ async def lifespan(app: FastAPI):
         logger.info("OpenSky Ingestion polling task disabled on this replica instance.")
         
     # 3. Synchronize stats endpoint & monitor live data continuity
-    from app.api.v1.endpoints import SYSTEM_STATS
     async def sync_stats_loop():
         gap_alert_active = False
         while True:
             try:
                 try:
-                    q_len = await asyncio.wait_for(redis_client.xlen("airguard:telemetry"), timeout=0.3)
+                    queue_state = await asyncio.wait_for(asyncio.gather(
+                        redis_client.xlen("airguard:telemetry"),
+                        redis_client.xinfo_groups("airguard:telemetry"),
+                    ), timeout=0.3)
+                    stream_length, groups = queue_state
+                    detection_group = next(
+                        (group for group in groups if group.get("name") == "detection-group"),
+                        None,
+                    )
+                    # XLen includes every historical stream entry, including
+                    # already-acknowledged telemetry. Report actual outstanding
+                    # work so the operations UI does not present an idle stream
+                    # as a permanently growing backlog.
+                    if detection_group is None or detection_group.get("lag") is None:
+                        q_len = stream_length
+                    else:
+                        q_len = int(detection_group.get("lag", 0)) + int(detection_group.get("pending", 0))
                     SYSTEM_STATS["queue_depth"] = q_len
                     from app.core.telemetry import QUEUE_DEPTH
                     QUEUE_DEPTH.set(q_len)
                 except Exception:
-                    SYSTEM_STATS["queue_depth"] = 0
+                    # Unknown queue depth during Redis outage is not zero work.
+                    pass
                 SYSTEM_STATS["circuit_breaker_state"] = ingestion_service.breaker_state
-                if ingestion_service.last_poll_timestamp:
-                    SYSTEM_STATS["last_successful_poll"] = ingestion_service.last_poll_timestamp
-                if ingestion_service.last_poll_records:
+                if ingestion_service.last_successful_update:
+                    SYSTEM_STATS["last_successful_poll"] = ingestion_service.last_successful_update
                     SYSTEM_STATS["last_poll_records"] = ingestion_service.last_poll_records
+                    SYSTEM_STATS["last_normalized_records"] = ingestion_service.last_normalized_records
+                    # _refresh_state synchronizes its JSON-safe telemetry into
+                    # SYSTEM_STATS itself; its return value is for WebSocket
+                    # clients and therefore contains ISO timestamp strings.
+                    ingestion_service._refresh_state()
                 if ingestion_service.rate_limit_remaining:
                     SYSTEM_STATS["rate_limit_remaining"] = ingestion_service.rate_limit_remaining
 
@@ -148,6 +177,13 @@ async def lifespan(app: FastAPI):
         stats_task, 
         return_exceptions=True
     )
+    await ingestion_service.client.aclose()
+    await route_service.http_client.aclose()
+    from app.ingestion.metadata_service import active_metadata_service
+    await active_metadata_service.http_client.aclose()
+    await opensky_auth.aclose()
+    await redis_client.aclose()
+    await engine.dispose()
     logger.info("Shutdown sequence completed.")
 
 app = FastAPI(
@@ -160,6 +196,52 @@ app = FastAPI(
 from app.api.v1.endpoints import router as api_router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
+def custom_openapi():
+    """Document the 400 response FastAPI emits for malformed request JSON."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        description=app.description,
+        routes=app.routes,
+    )
+    for endpoint_path, path_item in schema.get("paths", {}).items():
+        for _method, operation in path_item.items():
+            if not isinstance(operation, dict):
+                continue
+            operation.setdefault("responses", {}).setdefault(
+                "400", {"description": "The request is invalid"}
+            )
+            if "requestBody" in operation:
+                operation.setdefault("responses", {}).setdefault(
+                    "400", {"description": "Malformed request body"}
+                )
+            if (
+                operation.get("security") or "login" in operation.get("operationId", "").lower()
+            ):
+                responses = operation.setdefault("responses", {})
+                responses.setdefault("401", {"description": "Authentication required or invalid credentials"})
+                responses.setdefault("403", {"description": "Insufficient permissions"})
+            operation.setdefault("responses", {}).setdefault(
+                "404", {"description": "Requested resource was not found"}
+            )
+            if endpoint_path in {"/health", "/api/v1/health"}:
+                operation["responses"].setdefault(
+                    "503", {"description": "A required health dependency is unavailable"}
+                )
+            if "event-cases" in endpoint_path or "replay" in endpoint_path:
+                operation["responses"].setdefault(
+                    "409", {"description": "The requested state conflicts with current data"}
+                )
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -169,6 +251,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Active-Alert-Count", "X-AirGuard-Snapshot-Authoritative"],
 )
 
 import time
@@ -206,15 +289,34 @@ from app.core.database import get_db
 async def health_check(request: Request, db = Depends(get_db)):
     try:
         await db.execute(text("SELECT 1"))
-        return {"status": "healthy", "database": "connected", "service": settings.PROJECT_NAME}
     except Exception as e:
-        logger.error(f"Health check failed database check: {e}")
+        logger.error("Health check failed database check: %s", e)
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "database": "disconnected", "reason": str(e)}
+            content={"status": "unhealthy", "database": "disconnected", "redis": "unknown", "service": settings.PROJECT_NAME}
         )
+    try:
+        await redis_client.ping()
+    except Exception as e:
+        logger.error("Health check failed Redis check: %s", e)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "database": "connected", "redis": "disconnected", "service": settings.PROJECT_NAME}
+        )
+    from app.api.v1.endpoints import SYSTEM_STATS
+    return {
+        "status": "healthy",
+        "database": "connected",
+        "redis": "connected",
+        "upstream": SYSTEM_STATS.get("upstream_status", "UNKNOWN"),
+        "service": settings.PROJECT_NAME,
+    }
 
-@app.get("/metrics")
+@app.get(
+    "/metrics",
+    response_class=Response,
+    responses={200: {"content": {"text/plain": {"schema": {"type": "string"}}}}},
+)
 async def metrics_endpoint():
     """Prometheus Scraper Endpoint."""
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

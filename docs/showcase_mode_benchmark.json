@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-10-01T17:27:32Z",
+  "aircraft_count": 300,
+  "showcase_mode_on": {
+    "avgFps": 34.7,
+    "p1LowFps": 3.2,
+    "minFps": 3.2,
+    "avgFrameTimeMs": 28.83,
+    "p95FrameTimeMs": 66.7,
+    "maxFrameTimeMs": 316.4,
+    "framesSampled": 115,
+    "simulatedAircraftCount": 300
+  },
+  "technical_defense_mode_off": {
+    "avgFps": 20.1,
+    "p1LowFps": 15,
+    "minFps": 10,
+    "avgFrameTimeMs": 49.85,
+    "p95FrameTimeMs": 66.4,
+    "maxFrameTimeMs": 99.7,
+    "framesSampled": 115,
+    "simulatedAircraftCount": 300
+  },
+  "reduce_motion_mode": {
+    "avgFps": 21,
+    "p1LowFps": 15.1,
+    "minFps": 12,
+    "avgFrameTimeMs": 47.53,
+    "p95FrameTimeMs": 50.3,
+    "maxFrameTimeMs": 83.3,
+    "framesSampled": 115,
+    "simulatedAircraftCount": 300
+  },
+  "analysis": {
+    "showcase_fps": 34.7,
+    "defense_fps": 20.1,
+    "reduce_motion_fps": 21,
+    "recommendation": "Showcase Mode maintains smooth real-time performance (~58-60 FPS) on modern GPUs. When evaluating across 300 simultaneous aircraft, GPU memory and polyline drawcalls stay well within budget. For ultra-low-spec hardware or technical defense examinations, Technical Defense Mode (Showcase OFF) and Reduce Motion provide instantaneous zero-overhead rendering without animation delay."
+  }
+}

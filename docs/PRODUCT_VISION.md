@@ -23,6 +23,7 @@ AirGuard is an **airspace awareness and signal-quality learning platform**. It h
 - A global aircraft-state feed integration, with quota-aware polling and explicit empty and unavailable states.
 - Aircraft search, selection, route lookup where available, recent-track history, playback, map views and a browser-local nearby-aircraft view.
 - A rule and model pipeline for flagging unusual telemetry, plus alert inspection and historical replay against the data currently stored by the application.
+- A provisional space-time candidate view that groups recent real alerts and traces each group to its aircraft, stored observation positions/times, and alert records. Group membership does not establish causation; analysts still need a persisted case and disposition workflow.
 - Feed health and source provenance so users can understand the origin and freshness of each displayed report.
 
 AirGuard requests the provider's global state feed and displays only real provider reports. It does not generate fallback tracks or promise complete worldwide surveillance: visibility depends on receiver coverage, aircraft transmissions, provider availability, and access quota. When no current reports are returned, the map remains empty and reports the feed condition.

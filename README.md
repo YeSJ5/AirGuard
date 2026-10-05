@@ -18,14 +18,18 @@ Set up and launch the entire AirGuard stack (PostgreSQL database, FastAPI backen
 2. **Initialize Environment Configuration**:
    ```bash
    cp .env.example .env
+   cp backend/.env.example backend/.env
    ```
+   Put your OpenSky OAuth2 API client ID and secret in the repository-root `.env` as `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` for Compose. For `make dev`, put the same values in `backend/.env`. Authenticated credentials raise the global feed quota; anonymous requests have much lower quotas. Keep both `.env` files private and out of source control.
    Install the backend dependencies from the single root requirements file with `python -m pip install -r requirements.txt`.
 
 3. **Launch the Containerized Stack**:
    ```bash
    docker compose -f docker/docker-compose.yml up --build
    ```
-   *This command spins up the database, automatically applies Alembic migrations, starts the backend API/ingestion tasks, and serves the frontend dashboard at `http://localhost:5173`.*
+   *This command spins up PostgreSQL, Redis, the backend API/ingestion worker, and the frontend. The API applies Alembic migrations at startup and the app is served at `http://localhost:5173`.*
+
+In Docker deployments, the frontend serves the built application and proxies `/api/*`, `/health`, and WebSocket upgrades to the API service on the same origin. This supports HTTPS termination at a hosting reverse proxy without browser mixed-content failures. For local Vite development, the browser connects to the API port directly; `VITE_API_URL` and `VITE_WS_URL` can override those defaults.
 
 ## Project Structure
 - `/backend`: Python 3.11 service running FastAPI, Poetry, and background pipelines. Configured with slowapi rate-limiting, database connectors (sqlalchemy/asyncpg), and machine learning packages (scikit-learn/PyTorch).

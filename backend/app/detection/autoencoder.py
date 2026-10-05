@@ -4,7 +4,7 @@ import logging
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "autoencoder.pth")
 
@@ -129,3 +129,24 @@ def combine_scores(
     combined_risk = sum(weight * score for weight, score in weighted_signals) / total_weight
     combined_risk = min(1.0, max(0.0, combined_risk))
     return combined_risk, combined_risk >= threshold
+
+
+def compute_evidence_confidence(
+    rule_flags: List[bool | None],
+    ensemble_score: float | None,
+    autoencoder_score: float | None,
+    trilateration_consistency: float | None,
+) -> float:
+    """Computes evidence confidence/coverage as the proportion of the intended evidence stack available."""
+    assessed_rules = [flag for flag in rule_flags if flag is not None]
+    available_weight = 0.0
+    if assessed_rules:
+        available_weight += 0.40
+    if ensemble_score is not None:
+        available_weight += 0.30
+    if autoencoder_score is not None:
+        available_weight += 0.20
+    if trilateration_consistency is not None:
+        available_weight += 0.10
+    return round(min(1.0, max(0.0, available_weight)), 2)
+

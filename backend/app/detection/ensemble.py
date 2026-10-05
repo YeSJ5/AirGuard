@@ -1,7 +1,7 @@
 import os
 import joblib
 import numpy as np
-import shap
+import logging
 from typing import List, Dict, Any, Tuple
 
 # --- Feature Names ---
@@ -17,13 +17,18 @@ FEATURE_NAMES = [
     "rule_low_signal_confidence"
 ]
 
+logger = logging.getLogger("airguard.detection.ensemble")
+
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "ensemble_model.joblib")
 
 class TrustScoringEnsemble:
-    def __init__(self):
+    def __init__(self, load_artifact: bool = True):
         self.model = None
         self.explainer = None
-        self.load_model()
+        if load_artifact:
+            self.load_model()
+        else:
+            logger.info("Ensemble artifact loading is disabled by live-ML configuration.")
 
     def load_model(self) -> None:
         """Attempt to load trained ensemble model."""
@@ -33,14 +38,17 @@ class TrustScoringEnsemble:
             except Exception as e:
                 self.model = None
                 self.explainer = None
+                logger.exception("Trained ensemble model could not be loaded: %s", e)
 
     def get_explainer(self):
         """Lazy initialization of TreeExplainer."""
         if self.explainer is None and self.model is not None:
             try:
+                import shap
                 rf_estimator = self.model.named_estimators_['rf']
                 self.explainer = shap.TreeExplainer(rf_estimator)
             except Exception:
+                logger.exception("SHAP TreeExplainer initialization failed")
                 self.explainer = None
         return self.explainer
 

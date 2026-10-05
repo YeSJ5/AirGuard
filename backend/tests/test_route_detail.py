@@ -4,15 +4,23 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from httpx import AsyncClient, ASGITransport, Response
 
 from app.main import app
-from app.models import AircraftState, Alert, User, FlightRoute
+from app.models import AircraftState, AircraftAssessment, Alert, User, FlightRoute
 from app.core.database import get_db
 from app.api.deps import get_current_user, require_viewer
 from app.ingestion.route_service import FlightRouteService, get_airport_coordinates
 
+def _mock_db_session():
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+    session.add = MagicMock()
+    return session
+
+
 @pytest.fixture
 def mock_db():
-    session = AsyncMock()
-    return session
+    return _mock_db_session()
 
 @pytest.fixture(autouse=True)
 def override_deps(mock_db):
@@ -43,7 +51,7 @@ def test_airport_coordinate_lookup():
 @pytest.mark.asyncio
 async def test_route_service_fetch_and_cache():
     mock_session_maker = MagicMock()
-    mock_session = AsyncMock()
+    mock_session = _mock_db_session()
     mock_session_maker.return_value.__aenter__.return_value = mock_session
 
     service = FlightRouteService(mock_session_maker)
@@ -66,7 +74,7 @@ async def test_route_service_fetch_and_cache():
         request=MagicMock()
     )
 
-    with patch.object(service.http_client, "get", AsyncMock(return_value=mock_resp)):
+    with patch("app.ingestion.opensky_auth.opensky_auth.request", AsyncMock(return_value=mock_resp)):
         route = await service.get_or_fetch_route("800539", callsign="SEJ123", db=mock_session)
 
     assert route["icao24"] == "800539"
@@ -79,7 +87,7 @@ async def test_route_service_fetch_and_cache():
     assert route["arr_lng"] == 72.8656
 
     # Test in-memory cache hit: second call does not call OpenSky HTTP
-    with patch.object(service.http_client, "get", AsyncMock()) as mock_get:
+    with patch("app.ingestion.opensky_auth.opensky_auth.request", AsyncMock()) as mock_get:
         cached = await service.get_or_fetch_route("800539")
         assert cached == route
         mock_get.assert_not_called()
@@ -87,7 +95,7 @@ async def test_route_service_fetch_and_cache():
 @pytest.mark.asyncio
 async def test_route_service_fallback_when_route_unknown():
     mock_session_maker = MagicMock()
-    mock_session = AsyncMock()
+    mock_session = _mock_db_session()
     mock_session_maker.return_value.__aenter__.return_value = mock_session
 
     service = FlightRouteService(mock_session_maker)
@@ -99,7 +107,7 @@ async def test_route_service_fallback_when_route_unknown():
         request=MagicMock()
     )
 
-    with patch.object(service.http_client, "get", AsyncMock(return_value=mock_resp)):
+    with patch("app.ingestion.opensky_auth.opensky_auth.request", AsyncMock(return_value=mock_resp)):
         route = await service.get_or_fetch_route("a1b2c3", callsign="UNKNOWN1", db=mock_session)
 
     assert route["icao24"] == "a1b2c3"
@@ -131,17 +139,23 @@ async def test_aircraft_detail_endpoint_normal_flow(mock_db):
 
     # 1st query: AircraftState
     # 2nd query: Alert (none)
-    # 3rd query: min(AircraftState.received_at)
+    # 3rd query: scored assessment; 4th query: first-seen timestamp
     res_state = MagicMock()
     res_state.scalar_one_or_none.return_value = mock_state
 
     res_alert = MagicMock()
     res_alert.scalar_one_or_none.return_value = None
 
+    res_assessment = MagicMock()
+    res_assessment.scalar_one_or_none.return_value = AircraftAssessment(
+        aircraft_state_id=10, icao24="800539", combined_risk_score=0.05,
+        rule_assessment_coverage=1.0, status="SCORED", signals={},
+        detector_version="rules-v2", assessed_at=now,
+    )
     res_first_seen = MagicMock()
     res_first_seen.scalar_one_or_none.return_value = now
 
-    mock_db.execute.side_effect = [res_state, res_alert, res_first_seen]
+    mock_db.execute.side_effect = [res_state, res_alert, res_assessment, res_first_seen]
 
     # Mock route service returning verified route
     mock_route = {
@@ -186,7 +200,7 @@ async def test_aircraft_detail_endpoint_normal_flow(mock_db):
     assert data["route"]["arr_lat"] == 19.0896
 
     # 3. Trust status normal
-    assert data["trust_status"]["status_text"] == "Verified normal"
+    assert data["trust_status"]["status_text"] == "No active review flag"
     assert data["trust_status"]["is_flagged"] is False
     assert data["trust_status"]["combined_risk_score"] <= 0.1
 
@@ -210,7 +224,7 @@ async def test_aircraft_detail_endpoint_flagged_with_unknown_route(mock_db):
         received_at=now,
         source="opensky",
         reported_nic=2,
-        is_synthetic=True
+        is_synthetic=False
     )
 
     mock_alert = Alert(
@@ -239,10 +253,13 @@ async def test_aircraft_detail_endpoint_flagged_with_unknown_route(mock_db):
     res_alert = MagicMock()
     res_alert.scalar_one_or_none.return_value = mock_alert
 
+    res_assessment = MagicMock()
+    res_assessment.scalar_one_or_none.return_value = None
+
     res_first_seen = MagicMock()
     res_first_seen.scalar_one_or_none.return_value = now
 
-    mock_db.execute.side_effect = [res_state, res_alert, res_first_seen]
+    mock_db.execute.side_effect = [res_state, res_alert, res_assessment, res_first_seen]
 
     # Route unknown fallback
     mock_route = {

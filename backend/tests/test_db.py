@@ -1,8 +1,5 @@
 import pytest
 from datetime import datetime, timezone
-from sqlalchemy import inspect
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import Base, engine, async_session_maker
 from app.models import AircraftState, Alert, ModelRun, KnownEntity
 
 # --- Static Model Tests (Always Run, No DB required) ---
@@ -88,31 +85,12 @@ def test_static_known_entity_schema():
     assert table.c.added_at.type.timezone is True
 
 
-# --- Live DB Integration Tests (Skipped if DB connection fails) ---
-
-async def check_db_connection() -> bool:
-    """Helper to check if the database engine is reachable."""
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
-
-from sqlalchemy import text
-
+# --- Live PostgreSQL integration test in an isolated rollback-only schema ---
 @pytest.mark.asyncio
-async def test_live_db_crud_operations():
-    """Run live database migrations, inserts, queries and deletes if connection is active."""
-    if not await check_db_connection():
-        pytest.skip("PostgreSQL database is offline. Skipping live DB integration test.")
-
-    # Recreate tables dynamically in tests
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-
-    async with async_session_maker() as session:
+async def test_live_db_crud_operations(isolated_postgres_schema):
+    """Verify PostgreSQL CRUD and relationships without touching application tables."""
+    _, sessions = isolated_postgres_schema
+    async with sessions() as session:
         # 1. Insert AircraftState
         state = AircraftState(
             icao24="A1B2C3",

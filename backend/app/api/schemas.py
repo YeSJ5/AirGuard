@@ -1,11 +1,12 @@
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Literal
 from pydantic import BaseModel, Field
 
 class AircraftStateResponse(BaseModel):
-    id: int
+    id: Optional[int] = None
     icao24: str
     callsign: Optional[str] = None
+    squawk: Optional[str] = None
     latitude: float
     longitude: float
     altitude_m: float
@@ -22,6 +23,8 @@ class AircraftStateResponse(BaseModel):
     staleness_status: Optional[str] = "LIVE"
     trust_score: Optional[float] = None
     combined_risk_score: Optional[float] = None
+    evidence_confidence: Optional[float] = None
+    assessment_status: Optional[str] = None
 
     model_config = {
         "from_attributes": True,
@@ -107,6 +110,75 @@ class AlertResponse(BaseModel):
     }
 
 
+class AirspaceEventCandidate(BaseModel):
+    """A reproducible space-time grouping of persisted real alerts, not a causal event verdict."""
+    candidate_id: str
+    status: str = "REVIEW_REQUIRED"
+    start_time: datetime
+    end_time: datetime
+    center_latitude: float
+    center_longitude: float
+    aircraft_icao24: List[str]
+    alert_ids: List[int]
+    anomaly_types: List[str]
+    linked_alert_pairs: int
+    max_link_distance_km: float
+    time_window_minutes: int
+    radius_km: float
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+
+    model_config = {"extra": "forbid"}
+
+
+class AirspaceEventCaseCreate(BaseModel):
+    candidate_id: str = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=3, max_length=200)
+    alert_ids: List[int] = Field(min_length=2, max_length=1000)
+    time_window_minutes: int = Field(ge=1, le=240)
+    radius_km: float = Field(ge=1, le=500)
+
+    model_config = {"extra": "forbid"}
+
+
+class AirspaceEventCaseUpdate(BaseModel):
+    status: Optional[Literal["OPEN", "IN_REVIEW", "CLOSED"]] = None
+    disposition: Optional[Literal["CORRELATED", "NOT_CORRELATED", "INSUFFICIENT_EVIDENCE"]] = None
+    notes: Optional[str] = Field(default=None, max_length=4000)
+
+    model_config = {"extra": "forbid"}
+
+
+class AirspaceEventCaseReviewResponse(BaseModel):
+    id: int
+    reviewer_id: Optional[int] = None
+    action: str
+    previous_status: Optional[str] = None
+    new_status: str
+    previous_disposition: Optional[str] = None
+    new_disposition: Optional[str] = None
+    notes: Optional[str] = None
+    ip_address: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True, "extra": "ignore"}
+
+
+class AirspaceEventCaseResponse(BaseModel):
+    id: int
+    candidate_id: str
+    title: str
+    status: str
+    disposition: Optional[str] = None
+    evidence_snapshot: Dict[str, Any]
+    created_by: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    closed_at: Optional[datetime] = None
+    reviews: List[AirspaceEventCaseReviewResponse] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True, "extra": "ignore"}
+
+
 class ModelRunResponse(BaseModel):
     id: int
     run_at: datetime
@@ -128,13 +200,15 @@ class ModelRunResponse(BaseModel):
 
 
 class SystemHealthResponse(BaseModel):
+    database_status: str = "UNKNOWN"
+    redis_status: str = "UNKNOWN"
     poll_latency_ms: float
     queue_depth: int
     circuit_breaker_state: str
     last_successful_poll: Optional[datetime] = None
     last_poll_attempt: Optional[datetime] = None
     last_poll_records: int = 0
-    last_processed_records: int = 0
+    last_normalized_records: int = 0
     upstream_status: str = "UNKNOWN"
     feed_mode: str = "UNKNOWN"
     feed_source: str = "none"
@@ -149,6 +223,18 @@ class SystemHealthResponse(BaseModel):
     max_allowed_poll_gap_seconds: float = 20.0
     continuity_gap_detected: bool = False
     continuity_message: str = "Live data polling is continuous and healthy."
+    source_status: str = "AWAITING_TELEMETRY"
+    source_name: Optional[str] = None
+    last_successful_update: Optional[datetime] = None
+    next_attempt_at: Optional[datetime] = None
+    retry_after: Optional[datetime] = None
+    snapshot_age_seconds: Optional[float] = None
+    snapshot_count: Optional[int] = None
+    consecutive_failures: int = 0
+    last_error: Optional[str] = None
+    refresh_in_progress: bool = False
+    manual_refresh_pending: bool = False
+    refresh_interval_seconds: Optional[float] = None
 
     model_config = {
         "strict": False,
@@ -157,8 +243,8 @@ class SystemHealthResponse(BaseModel):
 
 
 class UserRegister(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=1024)
     role: str = "viewer"  # viewer, analyst, admin
 
     model_config = {
@@ -218,8 +304,8 @@ class AuditLogResponse(BaseModel):
 
 class TrustHistoryPoint(BaseModel):
     timestamp: datetime = Field(..., description="Timestamp of the telemetry reading.")
-    trust_score: float = Field(..., description="Derived index for the recorded scored observation; not an aircraft safety rating.")
-    instantaneous_risk: float = Field(..., description="Detector risk score for the recorded observation.")
+    risk_score: float = Field(..., description="Heuristic detector risk score for the recorded observation; not a probability.")
+    smoothed_risk_score: float = Field(..., description="Weighted mean of available detector risk scores in the selected window.")
     is_alert: bool = Field(default=False, description="Whether this state triggered a security alert.")
     reported_nic: Optional[int] = Field(default=None, description="Navigation Integrity Category at this point.")
 
@@ -232,11 +318,11 @@ class TrustHistoryPoint(BaseModel):
 
 class AircraftTrustHistoryResponse(BaseModel):
     icao24: str = Field(..., description="Unique 24-bit ICAO aircraft address.")
-    current_trust_score: Optional[float] = Field(default=None, description="Latest derived index when scored observations exist.")
+    current_risk_score: Optional[float] = Field(default=None, description="Latest heuristic detector risk score when scored observations exist.")
     window_size: int = Field(..., description="Configured smoothing window size in readings.")
     pattern: str = Field(..., description="Observed score pattern, or UNASSESSED when evidence is insufficient.")
-    caption: str = Field(..., description="Plain-English explanation of the observed trust pattern.")
-    history: List[TrustHistoryPoint] = Field(..., description="Chronological trust score trajectory.")
+    caption: str = Field(..., description="Plain-English explanation of the observed detector-risk pattern.")
+    history: List[TrustHistoryPoint] = Field(..., description="Chronological detector risk scores and their weighted mean.")
 
     model_config = {
         "from_attributes": True,
@@ -286,13 +372,18 @@ class AircraftTrustDetailResponse(BaseModel):
     status_text: str = Field(..., description="Assessment state; absence of a flag is not verification.")
     is_flagged: bool = Field(..., description="Whether aircraft currently has active security alerts or inconsistencies.")
     combined_risk_score: Optional[float] = Field(default=None, description="Instantaneous combined risk score when the detector produced one.")
-    rolling_trust_score: Optional[float] = Field(default=None, description="Smoothed session trust score when available.")
+    trust_score: Optional[float] = Field(default=None, description="Derived Telemetry Trust Index (0-100 scale); inverse of combined risk.")
+    evidence_confidence: Optional[float] = Field(default=None, description="Proportion of the intended detector evidence stack available.")
+    assessment_status: Optional[str] = Field(default=None, description="Canonical assessment status: ASSESSED, PARTIALLY_ASSESSED, REVIEW_REQUIRED, INSUFFICIENT_EVIDENCE, SUPPRESSED.")
+    smoothed_risk_score: Optional[float] = Field(default=None, description="Weighted detector risk score when available; not a trust rating.")
     explanation: str = Field(..., description="Story Mode plain-English narrative explanation.")
     reasons: List[str] = Field(default_factory=list, description="List of detected anomaly triggers.")
     rule_flags: Dict[str, bool] = Field(default_factory=dict, description="Active physical rule violation flags.")
     technical_details: Dict[str, Any] = Field(default_factory=dict, description="Technical diagnostics (SHAP, ensemble, autoencoder).")
+    unavailable_reasons: List[str] = Field(default_factory=list, description="List of reasons why optional evidence layers are unavailable.")
     trilateration_stations: Optional[int] = Field(default=None, description="Number of measured receiver observations, when supplied by the source.")
     last_evaluated_at: Optional[datetime] = Field(default=None, description="Timestamp of the most recent security evaluation.")
+
 
     model_config = {
         "from_attributes": True,
@@ -331,6 +422,3 @@ class AircraftDetailResponse(BaseModel):
         "strict": True,
         "extra": "ignore"
     }
-
-
-
