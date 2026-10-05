@@ -2442,14 +2442,118 @@ export default function App() {
         </div>
 
       </header>
-      <nav aria-label="Primary navigation" className="relative z-20 flex flex-wrap items-center gap-1 px-4 md:px-6 py-1.5 border-b border-slate-800 bg-[#0b1220]">
-        <button onClick={() => setCurrentTier('tier2_radar')} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${currentTier === 'tier2_radar' ? 'bg-sky-400/10 text-sky-200' : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'}`}>Airspace</button>
-        <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('alerts'); }} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${currentTier === 'tier3_tools' && tier3Tab === 'alerts' ? 'bg-rose-400/10 text-rose-200' : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'}`}>Threats <span className="ml-1 text-[10px] text-rose-300">{activeAlertCount || ''}</span></button>
-        <button onClick={() => { if (!selectedFlightId && flights[0]) setSelectedFlightId(flights[0].id); setCurrentTier('tier2_radar'); setIsDetailDrawerOpen(true); }} className="px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-400 hover:bg-white/5 hover:text-slate-100 transition-colors">Investigate</button>
-        <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('analytics'); }} className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${currentTier === 'tier3_tools' && tier3Tab === 'analytics' ? 'bg-sky-400/10 text-sky-200' : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'}`}>Analytics</button>
+      <nav aria-label="Primary navigation" className="relative z-20 flex flex-wrap items-center gap-1.5 px-4 md:px-6 py-1.5 border-b border-slate-800 bg-[#0b1220]">
+        <button
+          onClick={() => setCurrentTier('tier2_radar')}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+            currentTier === 'tier2_radar'
+              ? 'bg-sky-500/20 text-sky-200 border border-sky-400/40 shadow-[0_0_10px_rgba(56,189,248,0.2)]'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+          }`}
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 2a10 10 0 0 1 10 10" />
+            <path d="M12 12 19 5" />
+            <circle cx="12" cy="12" r="2" />
+          </svg>
+          <span>Airspace</span>
+        </button>
+
+        <button
+          onClick={() => {
+            setCurrentTier('tier3_tools');
+            setTier3Tab('alerts');
+          }}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+            currentTier === 'tier3_tools' && tier3Tab === 'alerts'
+              ? 'bg-rose-500/20 text-rose-200 border border-rose-400/40 shadow-[0_0_10px_rgba(244,63,94,0.2)]'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+          }`}
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span>Threats</span>
+          {activeAlertCount > 0 && (
+            <span className="ml-1 px-1.5 py-0.2 rounded-full bg-rose-500/30 border border-rose-500/50 text-[10px] text-rose-300 font-bold font-mono">
+              {activeAlertCount}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => {
+            if (!selectedFlightId && flights[0]) setSelectedFlightId(flights[0].id);
+            setCurrentTier('tier2_radar');
+            setIsDetailDrawerOpen(true);
+          }}
+          className="px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-400 hover:bg-white/5 hover:text-slate-100 transition-colors flex items-center gap-1.5 cursor-pointer"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+          </svg>
+          <span>Investigate</span>
+        </button>
+
+        <button
+          onClick={() => {
+            setCurrentTier('tier3_tools');
+            setTier3Tab('analytics');
+          }}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+            currentTier === 'tier3_tools' && tier3Tab === 'analytics'
+              ? 'bg-sky-500/20 text-sky-200 border border-sky-400/40 shadow-[0_0_10px_rgba(56,189,248,0.2)]'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+          }`}
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="20" x2="18" y2="10" />
+            <line x1="12" y1="20" x2="12" y2="4" />
+            <line x1="6" y1="20" x2="6" y2="14" />
+          </svg>
+          <span>Analytics</span>
+        </button>
+
         <span className="mx-1 h-5 border-l border-slate-800" />
-        <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('playback'); }} className="px-3 py-1.5 text-xs rounded text-slate-500 hover:text-slate-200">REPLAY</button>
-        <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('config'); }} className="px-3 py-1.5 text-xs rounded text-slate-500 hover:text-slate-200">SYSTEM</button>
+
+        <button
+          onClick={() => {
+            setCurrentTier('tier3_tools');
+            setTier3Tab('playback');
+          }}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+            currentTier === 'tier3_tools' && tier3Tab === 'playback'
+              ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+          }`}
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <polygon points="10 8 16 12 10 16 10 8" fill="currentColor" />
+          </svg>
+          <span>Replay</span>
+        </button>
+
+        <button
+          onClick={() => {
+            setCurrentTier('tier3_tools');
+            setTier3Tab('config');
+          }}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+            currentTier === 'tier3_tools' && tier3Tab === 'config'
+              ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+          }`}
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+          <span>System</span>
+        </button>
       </nav>
 
       {/* ========================================================================= */}
