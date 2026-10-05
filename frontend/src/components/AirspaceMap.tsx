@@ -57,6 +57,41 @@ interface AirspaceMapProps {
   route?: RouteOverlay | null;
 }
 
+type MapLayerType = 'dark' | 'satellite' | 'street';
+
+const MAP_LAYERS: Record<MapLayerType, { name: string; url: string; subdomains?: string; maxZoom: number; attribution: string }> = {
+  dark: {
+    name: 'Dark Tactical',
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    subdomains: 'abcd',
+    maxZoom: 20,
+    attribution: '&copy; CartoDB &copy; OpenStreetMap'
+  },
+  satellite: {
+    name: 'Satellite Hybrid',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    maxZoom: 18,
+    attribution: '&copy; Esri &copy; Maxar'
+  },
+  street: {
+    name: 'Aviation Standard',
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    subdomains: 'abc',
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'
+  }
+};
+
+const REGION_CENTERS = [
+  { name: 'All India', lat: 21.5, lng: 78.9, zoom: 5 },
+  { name: 'Delhi (DEL)', lat: 28.5562, lng: 77.1000, zoom: 10 },
+  { name: 'Mumbai (BOM)', lat: 19.0896, lng: 72.8656, zoom: 10 },
+  { name: 'Bengaluru (BLR)', lat: 13.1986, lng: 77.7066, zoom: 10 },
+  { name: 'Hyderabad (HYD)', lat: 17.2403, lng: 78.4294, zoom: 10 },
+  { name: 'Kolkata (CCU)', lat: 22.6547, lng: 88.4467, zoom: 10 },
+  { name: 'Chennai (MAA)', lat: 12.9941, lng: 80.1709, zoom: 10 }
+];
+
 // Calculate accurate status theme matching the map legend (Nominal: Cyan, Review: Amber, Critical: Red, Unassessed: Slate)
 function getFlightStatusTheme(flight: Flight) {
   const trust = flight.trustScore ?? flight.trust_score;
@@ -84,7 +119,7 @@ function getFlightStatusTheme(flight: Flight) {
     return {
       fill: '#ef4444', // Red / Critical
       stroke: '#7f1d1d',
-      glow: 'rgba(239, 68, 68, 0.6)',
+      glow: 'rgba(239, 68, 68, 0.7)',
       badgeDot: '#ef4444',
       badgeBorder: 'rgba(239, 68, 68, 0.85)',
       statusLabel: 'CRITICAL',
@@ -95,7 +130,7 @@ function getFlightStatusTheme(flight: Flight) {
     return {
       fill: '#f59e0b', // Amber / Review
       stroke: '#78350f',
-      glow: 'rgba(245, 158, 11, 0.55)',
+      glow: 'rgba(245, 158, 11, 0.6)',
       badgeDot: '#f59e0b',
       badgeBorder: 'rgba(245, 158, 11, 0.8)',
       statusLabel: 'REVIEW',
@@ -106,7 +141,7 @@ function getFlightStatusTheme(flight: Flight) {
     return {
       fill: '#94a3b8', // Slate / Unassessed
       stroke: '#334155',
-      glow: 'rgba(148, 163, 184, 0.3)',
+      glow: 'rgba(148, 163, 184, 0.35)',
       badgeDot: '#94a3b8',
       badgeBorder: 'rgba(148, 163, 184, 0.5)',
       statusLabel: 'UNASSESSED',
@@ -117,14 +152,14 @@ function getFlightStatusTheme(flight: Flight) {
   return {
     fill: '#38bdf8', // Cyan / Nominal
     stroke: '#0369a1',
-    glow: 'rgba(56, 189, 248, 0.4)',
+    glow: 'rgba(56, 189, 248, 0.45)',
     badgeDot: '#38bdf8',
     badgeBorder: 'rgba(56, 189, 248, 0.6)',
     statusLabel: 'NOMINAL',
   };
 }
 
-// Draw crisp animated aircraft vector onto 2D Canvas with clear status coloration
+// High performance aircraft renderer (0 allocations in loop, selective glow)
 function drawAnimatedAircraft(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -139,46 +174,46 @@ function drawAnimatedAircraft(
   ctx.save();
   ctx.translate(x, y);
 
-  // Animated Target Ripples on Selected Flight
+  // Animated Tactical Target Rings on Selected Aircraft
   if (isSelected) {
-    const pulsePhase1 = (timeSec * 1.5) % 1;
-    const pulsePhase2 = (timeSec * 1.5 + 0.5) % 1;
+    const pulsePhase1 = (timeSec * 1.6) % 1;
+    const pulsePhase2 = (timeSec * 1.6 + 0.5) % 1;
 
     ctx.beginPath();
-    ctx.arc(0, 0, 14 + pulsePhase1 * 20, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(56, 189, 248, ${(1 - pulsePhase1) * 0.75})`;
+    ctx.arc(0, 0, 14 + pulsePhase1 * 22, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(56, 189, 248, ${(1 - pulsePhase1) * 0.85})`;
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.arc(0, 0, 14 + pulsePhase2 * 20, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(56, 189, 248, ${(1 - pulsePhase2) * 0.75})`;
+    ctx.arc(0, 0, 14 + pulsePhase2 * 22, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(56, 189, 248, ${(1 - pulsePhase2) * 0.85})`;
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.arc(0, 0, 15, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.95)';
+    ctx.arc(0, 0, 16, 0, Math.PI * 2);
+    ctx.strokeStyle = '#38bdf8';
     ctx.lineWidth = 2;
     ctx.stroke();
   } else if (theme.statusLabel === 'CRITICAL') {
-    const pulse = 0.5 + 0.5 * Math.sin(timeSec * 6);
+    const pulse = 0.5 + 0.5 * Math.sin(timeSec * 7);
     ctx.beginPath();
-    ctx.arc(0, 0, 13 + pulse * 7, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(239, 68, 68, ${0.4 + pulse * 0.5})`;
+    ctx.arc(0, 0, 13 + pulse * 8, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(239, 68, 68, ${0.4 + pulse * 0.55})`;
     ctx.lineWidth = 2;
     ctx.stroke();
   } else if (theme.statusLabel === 'REVIEW') {
     const pulse = 0.5 + 0.5 * Math.sin(timeSec * 4);
     ctx.beginPath();
-    ctx.arc(0, 0, 12 + pulse * 5, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(245, 158, 11, ${0.35 + pulse * 0.4})`;
+    ctx.arc(0, 0, 12 + pulse * 6, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(245, 158, 11, ${0.35 + pulse * 0.45})`;
     ctx.lineWidth = 1.5;
     ctx.stroke();
   } else if (isHovered) {
     ctx.beginPath();
-    ctx.arc(0, 0, 15, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.arc(0, 0, 16, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -188,7 +223,7 @@ function drawAnimatedAircraft(
   const s = size / 32;
   ctx.scale(s, s);
 
-  // Jet Silhouette
+  // High definition jet vector silhouette
   ctx.beginPath();
   ctx.moveTo(0, -15);
   ctx.bezierCurveTo(1.5, -15, 2.2, -12, 2.2, -8);
@@ -211,14 +246,19 @@ function drawAnimatedAircraft(
   ctx.bezierCurveTo(-2.2, -12, -1.5, -15, 0, -15);
   ctx.closePath();
 
-  // Vibrant fill according to threat status
+  // Vibrant fill with status coloration (only apply shadow blur for selected/hovered to maintain 60fps)
+  if (isSelected || isHovered) {
+    ctx.shadowColor = theme.glow;
+    ctx.shadowBlur = isSelected ? 14 : 8;
+  }
   ctx.fillStyle = theme.fill;
-  ctx.shadowColor = theme.glow;
-  ctx.shadowBlur = isSelected ? 12 : isHovered ? 8 : 4;
   ctx.fill();
 
+  if (isSelected || isHovered) {
+    ctx.shadowBlur = 0;
+  }
+
   // Clean dark outline
-  ctx.shadowBlur = 0;
   ctx.strokeStyle = '#04070e';
   ctx.lineWidth = 1.4;
   ctx.stroke();
@@ -283,15 +323,6 @@ function drawCallsignAndCompanyBadge(
   ctx.restore();
 }
 
-const REGION_CENTERS = [
-  { name: 'All India', lat: 21.5, lng: 78.9, zoom: 5 },
-  { name: 'Delhi (DEL)', lat: 28.5562, lng: 77.1, zoom: 10 },
-  { name: 'Mumbai (BOM)', lat: 19.0896, lng: 72.8656, zoom: 10 },
-  { name: 'Bengaluru (BLR)', lat: 13.1986, lng: 77.7066, zoom: 10 },
-  { name: 'Kolkata (CCU)', lat: 22.6547, lng: 88.4467, zoom: 10 },
-  { name: 'Chennai (MAA)', lat: 12.9941, lng: 80.1709, zoom: 10 },
-];
-
 export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   flights,
   selectedFlight,
@@ -302,23 +333,27 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
+  const currentTileLayerRef = useRef<L.TileLayer | null>(null);
   const routeLayerRef = useRef<L.LayerGroup | null>(null);
   const nearbyLayerRef = useRef<L.LayerGroup | null>(null);
+  const hoverTooltipRef = useRef<HTMLDivElement | null>(null);
 
   const lastCenterRef = useRef<[number, number]>([21.5, 78.9]);
   const lastZoomRef = useRef<number>(5);
+  const lastHoveredIdRef = useRef<string | null>(null);
 
   const [activeRegion, setActiveRegion] = useState<string>('All India');
+  const [activeMapLayer, setActiveMapLayer] = useState<MapLayerType>('dark');
   const [activeFloatingFlight, setActiveFloatingFlight] = useState<Flight | null>(null);
   const [hoveredFlight, setHoveredFlight] = useState<Flight | null>(null);
-  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const [followSelected, setFollowSelected] = useState<boolean>(false);
   const [nearbyLocation, setNearbyLocation] = useState<UserLocation | null>(null);
   const [nearbyStatus, setNearbyStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [isNearbyOpen, setIsNearbyOpen] = useState<boolean>(false);
+  const [isLayerMenuOpen, setIsLayerMenuOpen] = useState<boolean>(false);
+  const [quickFilter, setQuickFilter] = useState<'all' | 'flagged' | 'airborne'>('all');
 
   // Fullscreen & Right Sidebar state
-  // Fullscreen is 100% window size; sidebar is HIDDEN by default until a flight or the 3 lines button is clicked
   const [isExpanded, setIsExpanded] = useState<boolean>(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
   const [sidebarSearch, setSidebarSearch] = useState<string>('');
@@ -331,7 +366,18 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const continuousAnimRef = useRef<number | null>(null);
   const previousSelectedIdRef = useRef<string | null>(null);
 
-  latestFlightsRef.current = flights;
+  // Filtered flights for the map view based on quickFilter
+  const displayableFlights = useMemo(() => {
+    if (quickFilter === 'flagged') {
+      return flights.filter(f => f.status === 'critical' || f.status === 'suspicious');
+    }
+    if (quickFilter === 'airborne') {
+      return flights.filter(f => (f.altitude ?? 0) >= 10000);
+    }
+    return flights;
+  }, [flights, quickFilter]);
+
+  latestFlightsRef.current = displayableFlights;
   latestSelectedFlightRef.current = selectedFlight;
   latestHoveredFlightRef.current = hoveredFlight;
   onSelectFlightRef.current = onSelectFlight;
@@ -365,24 +411,6 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     });
   }, [flights, sidebarSearch, sidebarFilter]);
 
-  const locateNearbyAircraft = () => {
-    if (!navigator.geolocation) {
-      setNearbyStatus('error');
-      return;
-    }
-    setNearbyStatus('loading');
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const location = { lat: position.coords.latitude, lng: position.coords.longitude };
-        setNearbyLocation(location);
-        setNearbyStatus('ready');
-        mapRef.current?.flyTo([location.lat, location.lng], 7, { duration: 0.8 });
-      },
-      () => setNearbyStatus('error'),
-      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 10_000 }
-    );
-  };
-
   // High performance Canvas render loop with rock-solid transform stability
   const renderCanvas = useCallback(() => {
     const map = mapRef.current;
@@ -406,7 +434,6 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       canvas.height = targetH;
     }
 
-    // Explicitly reset transform matrix to DPR to prevent transform compounding & blinking
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
 
@@ -464,7 +491,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       }
     }
 
-    // Draw hovered flight
+    // Draw hovered flight on top
     if (hoveredFlightToDraw) {
       const { flight, x, y } = hoveredFlightToDraw;
       const theme = getFlightStatusTheme(flight);
@@ -476,14 +503,14 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       }
     }
 
-    // Draw selected flight on top with animated target ring & verified breadcrumb trail
+    // Draw selected flight with verified breadcrumb trail and pulsing target ring
     if (selectedFlightToDraw) {
       const { flight, x, y } = selectedFlightToDraw;
       const theme = getFlightStatusTheme(flight);
 
       const history = (flight.history || []).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
       if (history.length > 1) {
-        // 1. Glowing background aura for the path
+        // Glowing background aura for the path
         ctx.beginPath();
         for (let j = 0; j < history.length; j++) {
           const hp = map.latLngToContainerPoint([history[j].lat, history[j].lng]);
@@ -491,10 +518,10 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           else ctx.lineTo(hp.x, hp.y);
         }
         ctx.strokeStyle = theme.glow;
-        ctx.lineWidth = 6;
+        ctx.lineWidth = 5;
         ctx.stroke();
 
-        // 2. Crisp dashed trajectory line
+        // Crisp dashed trajectory line
         ctx.beginPath();
         for (let j = 0; j < history.length; j++) {
           const hp = map.latLngToContainerPoint([history[j].lat, history[j].lng]);
@@ -507,7 +534,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // 3. Waypoint fix nodes along the trail
+        // Waypoint fix nodes along trail
         const step = Math.max(1, Math.floor(history.length / 20));
         for (let j = 0; j < history.length - 1; j += step) {
           const hp = map.latLngToContainerPoint([history[j].lat, history[j].lng]);
@@ -515,18 +542,6 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           ctx.arc(hp.x, hp.y, 2.5, 0, Math.PI * 2);
           ctx.fillStyle = j === 0 ? theme.fill : 'rgba(56, 189, 248, 0.65)';
           ctx.fill();
-        }
-
-        // 4. Origin Departure halo marker at history[0]
-        if (history.length > 2) {
-          const startPt = map.latLngToContainerPoint([history[0].lat, history[0].lng]);
-          ctx.beginPath();
-          ctx.arc(startPt.x, startPt.y, 4, 0, Math.PI * 2);
-          ctx.fillStyle = '#06b6d4';
-          ctx.fill();
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
         }
       }
 
@@ -571,7 +586,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     setIsExpanded((prev) => {
       const next = !prev;
       if (next) {
-        setIsSidebarOpen(false); // Clean 100% window map on entry
+        setIsSidebarOpen(false);
       } else {
         setIsSidebarOpen(false);
       }
@@ -610,7 +625,28 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     };
   }, [isSidebarOpen, renderCanvas]);
 
-  // Initialize Map whenever mounted (re-attaches cleanly when portaled to document.body)
+  // Switch Map Layer cleanly
+  const switchMapLayer = (layerKey: MapLayerType) => {
+    const map = mapRef.current;
+    if (!map) return;
+    setActiveMapLayer(layerKey);
+    setIsLayerMenuOpen(false);
+
+    if (currentTileLayerRef.current) {
+      map.removeLayer(currentTileLayerRef.current);
+    }
+
+    const cfg = MAP_LAYERS[layerKey];
+    const newLayer = L.tileLayer(cfg.url, {
+      maxZoom: cfg.maxZoom,
+      subdomains: cfg.subdomains || 'abc',
+      attribution: cfg.attribution,
+    });
+    newLayer.addTo(map);
+    currentTileLayerRef.current = newLayer;
+  };
+
+  // Initialize Map with high-performance Inertia and Smooth Panning
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
@@ -618,19 +654,29 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       center: lastCenterRef.current,
       zoom: lastZoomRef.current,
       zoomControl: false,
-      attributionControl: true,
+      attributionControl: false,
       minZoom: 2,
-      maxZoom: 18,
+      maxZoom: 19,
       preferCanvas: true,
+      zoomAnimation: true,
+      fadeAnimation: true,
+      markerZoomAnimation: true,
+      inertia: true,
+      inertiaDeceleration: 3400,
+      inertiaMaxSpeed: 2400,
+      easeLinearity: 0.18,
+      wheelDebounceTime: 35,
+      wheelPxPerZoomLevel: 80,
     });
 
-    const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    const cfg = MAP_LAYERS[activeMapLayer];
+    const tileLayer = L.tileLayer(cfg.url, {
+      maxZoom: cfg.maxZoom,
+      subdomains: cfg.subdomains || 'abc',
+      attribution: cfg.attribution,
     });
     tileLayer.addTo(map);
-
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    currentTileLayerRef.current = tileLayer;
 
     routeLayerRef.current = L.layerGroup().addTo(map);
     nearbyLayerRef.current = L.layerGroup().addTo(map);
@@ -647,6 +693,8 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     const t3 = setTimeout(handleResize, 350);
 
     const container = map.getContainer();
+
+    // Zero-lag mouse hover hit-testing with direct tooltip DOM updates
     const handleMouseMove = (e: MouseEvent) => {
       const rect = container.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
@@ -669,14 +717,21 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
         }
       }
 
-      if (found) {
-        container.style.cursor = 'pointer';
+      // Direct DOM transform update without React re-render thrashing
+      if (hoverTooltipRef.current) {
+        if (found) {
+          hoverTooltipRef.current.style.transform = `translate3d(${mouseX}px, ${mouseY - 14}px, 0)`;
+          hoverTooltipRef.current.style.display = 'block';
+        } else {
+          hoverTooltipRef.current.style.display = 'none';
+        }
+      }
+
+      // Only update React state when the target flight identity actually changes
+      if (found?.id !== lastHoveredIdRef.current) {
+        lastHoveredIdRef.current = found?.id ?? null;
+        container.style.cursor = found ? 'pointer' : '';
         setHoveredFlight(found);
-        setHoverPos({ x: mouseX, y: mouseY });
-      } else {
-        container.style.cursor = '';
-        setHoveredFlight(null);
-        setHoverPos(null);
       }
     };
 
@@ -705,21 +760,21 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       if (clicked) {
         onSelectFlightRef.current?.(clicked);
         setActiveFloatingFlight(clicked);
-        // Open right sidebar when clicking a flight
         setIsSidebarOpen(true);
       } else {
         const target = e.target as HTMLElement;
         if (
           !target?.closest('.airguard-floating-card') &&
           !target?.closest('.airguard-expanded-sidebar') &&
-          !target?.closest('.airguard-sidebar-toggle-btn')
+          !target?.closest('.airguard-sidebar-toggle-btn') &&
+          !target?.closest('.airguard-map-controls')
         ) {
           setActiveFloatingFlight(null);
         }
       }
     };
 
-    container.addEventListener('mousemove', handleMouseMove);
+    container.addEventListener('mousemove', handleMouseMove, { passive: true });
     container.addEventListener('click', handleClick);
     window.addEventListener('resize', handleResize);
 
@@ -737,11 +792,13 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
         map.remove();
       } catch (err) {}
       mapRef.current = null;
+      currentTileLayerRef.current = null;
       routeLayerRef.current = null;
       nearbyLayerRef.current = null;
     };
   }, [isExpanded, renderCanvas]);
 
+  // Smooth follow selected flight
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !selectedFlight) {
@@ -757,6 +814,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     }
   }, [selectedFlight, followSelected]);
 
+  // Route overlay
   useEffect(() => {
     const layer = routeLayerRef.current;
     if (!layer) return;
@@ -792,6 +850,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     }
   }, [route]);
 
+  // Nearby layer
   useEffect(() => {
     const layer = nearbyLayerRef.current;
     if (!layer) return;
@@ -819,6 +878,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       .addTo(layer);
   }, [nearbyLocation]);
 
+  // Sync active floating flight with live telemetry updates
   useEffect(() => {
     if (activeFloatingFlight) {
       const updated = flights.find((f) => f.id === activeFloatingFlight.id);
@@ -840,7 +900,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const zoomToRegion = (regionName: string, lat: number, lng: number, zoom: number) => {
     setActiveRegion(regionName);
     if (mapRef.current) {
-      mapRef.current.flyTo([lat, lng], zoom, { duration: 0.8 });
+      mapRef.current.flyTo([lat, lng], zoom, { duration: 0.7 });
     }
   };
 
@@ -855,17 +915,48 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     setActiveRegion('Auto Fit');
   };
 
+  const zoomIn = () => mapRef.current?.zoomIn();
+  const zoomOut = () => mapRef.current?.zoomOut();
+  const resetNorth = () => {
+    if (mapRef.current) {
+      mapRef.current.flyTo([21.5, 78.9], 5, { duration: 0.7 });
+      setActiveRegion('All India');
+    }
+  };
+
+  const locateNearbyAircraft = () => {
+    if (!navigator.geolocation) {
+      setNearbyStatus('error');
+      return;
+    }
+    setNearbyStatus('loading');
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const location = { lat: position.coords.latitude, lng: position.coords.longitude };
+        setNearbyLocation(location);
+        setNearbyStatus('ready');
+        mapRef.current?.flyTo([location.lat, location.lng], 7, { duration: 0.8 });
+      },
+      () => setNearbyStatus('error'),
+      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 10_000 }
+    );
+  };
+
   const hoveredAirline = hoveredFlight ? getAirlineInfo(hoveredFlight.callsign) : null;
   const activeAirline = activeFloatingFlight ? getAirlineInfo(activeFloatingFlight.callsign) : null;
   const activeDetailedFlight = selectedFlight || activeFloatingFlight;
   const detailedAirline = activeDetailedFlight ? getAirlineInfo(activeDetailedFlight.callsign) : null;
 
-  // The Map JSX Layout
+  const criticalCount = useMemo(() => flights.filter(f => f.status === 'critical').length, [flights]);
+  const reviewCount = useMemo(() => flights.filter(f => f.status === 'suspicious').length, [flights]);
+  const nominalCount = useMemo(() => flights.filter(f => f.status === 'normal').length, [flights]);
+
+  // Main Map JSX
   const mapContent = (
     <div
-      className={`relative w-full h-full bg-[#0b1220] overflow-hidden select-none ${
+      className={`relative w-full h-full bg-[#060913] overflow-hidden select-none ${
         isExpanded
-          ? 'fixed inset-0 z-[999999] w-screen h-screen flex flex-col md:flex-row bg-[#060913]'
+          ? 'fixed inset-0 z-[999999] w-screen h-screen flex flex-col md:flex-row bg-[#04070e]'
           : 'min-h-[360px]'
       }`}
       style={
@@ -894,85 +985,125 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           className="absolute inset-0 pointer-events-none z-[400] w-full h-full"
         />
 
-        {/* Quick Region Navigation Bar */}
-        <div className="absolute top-4 left-4 z-[450] max-w-[calc(100%-8rem)] sm:max-w-[calc(100%-20rem)] flex items-center gap-1.5 overflow-x-auto bg-[#0b1220]/90 backdrop-blur-xl px-2.5 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-medium text-slate-200">
-          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mr-1 shrink-0">Region</span>
-          {REGION_CENTERS.map((reg) => (
+        {/* Top-Left Tactical HUD: Quick Regions & View Filters */}
+        <div className="airguard-map-controls absolute top-3 left-3 sm:top-4 sm:left-4 z-[450] max-w-[calc(100%-8rem)] sm:max-w-[calc(100%-22rem)] flex flex-col gap-2 pointer-events-auto">
+          {/* Region Quick Navigation */}
+          <div className="flex items-center gap-1.5 overflow-x-auto bg-[#070d1a]/92 backdrop-blur-xl px-2.5 py-1.5 rounded-xl shadow-xl border border-white/10 text-xs font-medium text-slate-200">
+            <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mr-1 shrink-0">Region</span>
+            {REGION_CENTERS.map((reg) => (
+              <button
+                key={reg.name}
+                onClick={() => zoomToRegion(reg.name, reg.lat, reg.lng, reg.zoom)}
+                className={`px-2 py-1 rounded-lg transition-all font-semibold whitespace-nowrap text-xs cursor-pointer ${
+                  activeRegion === reg.name
+                    ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-400/50 shadow-[0_0_12px_rgba(6,182,212,0.3)]'
+                    : 'text-slate-300 hover:bg-white/10'
+                }`}
+              >
+                {reg.name}
+              </button>
+            ))}
+            <span className="text-slate-700">|</span>
             <button
-              key={reg.name}
-              onClick={() => zoomToRegion(reg.name, reg.lat, reg.lng, reg.zoom)}
-              className={`px-2.5 py-1.5 rounded-lg transition-all font-semibold whitespace-nowrap cursor-pointer ${
-                activeRegion === reg.name
-                  ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40 shadow-[0_0_10px_rgba(6,182,212,0.25)]'
-                  : 'text-slate-300 hover:bg-white/10'
+              onClick={centerAllFlights}
+              className="px-2 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/35 hover:bg-emerald-500/25 transition-all font-semibold whitespace-nowrap flex items-center gap-1 cursor-pointer text-xs"
+              title="Center map to encompass all detected aircraft"
+            >
+              <span>⤢</span>
+              <span>Fit All</span>
+            </button>
+          </div>
+
+          {/* Quick Filter Chips */}
+          <div className="flex items-center gap-1.5 text-[11px] font-mono">
+            <button
+              onClick={() => setQuickFilter('all')}
+              className={`px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
+                quickFilter === 'all'
+                  ? 'bg-cyan-950/80 border-cyan-500/60 text-cyan-200 font-bold'
+                  : 'bg-[#0b1424]/80 border-white/10 text-slate-400 hover:text-white'
               }`}
             >
-              {reg.name}
+              All ({flights.length})
             </button>
-          ))}
-          <span className="text-slate-700">|</span>
-          <button
-            onClick={centerAllFlights}
-            className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 transition-all font-semibold whitespace-nowrap flex items-center gap-1 cursor-pointer"
-            title="Center map to encompass all detected aircraft"
-          >
-            <span>⤢</span>
-            <span>Fit All</span>
-          </button>
+            <button
+              onClick={() => setQuickFilter('flagged')}
+              className={`px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
+                quickFilter === 'flagged'
+                  ? 'bg-rose-950/80 border-rose-500/60 text-rose-300 font-bold shadow-[0_0_10px_rgba(244,63,94,0.3)]'
+                  : 'bg-[#0b1424]/80 border-white/10 text-slate-400 hover:text-white'
+              }`}
+            >
+              Flagged ({criticalCount + reviewCount})
+            </button>
+            <button
+              onClick={() => setQuickFilter('airborne')}
+              className={`px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
+                quickFilter === 'airborne'
+                  ? 'bg-sky-950/80 border-sky-500/60 text-sky-200 font-bold'
+                  : 'bg-[#0b1424]/80 border-white/10 text-slate-400 hover:text-white'
+              }`}
+            >
+              Cruising (&gt;10k ft)
+            </button>
+          </div>
         </div>
 
-        {/* Hover Tooltip with Company/Airline Name */}
-        {hoveredFlight && hoverPos && !activeFloatingFlight && !isExpanded && (
-          <div
-            className="pointer-events-none absolute z-[550] -translate-x-1/2 -translate-y-full mb-2 bg-[#0b1220]/95 border border-cyan-500/40 rounded-xl px-3 py-2 shadow-2xl backdrop-blur-md text-white font-mono text-[11px] whitespace-nowrap animate-in fade-in duration-100"
-            style={{ left: hoverPos.x, top: hoverPos.y - 14 }}
-          >
-            <div className="flex items-center gap-2">
-              <span
-                className={`w-2.5 h-2.5 rounded-full ${
-                  hoveredFlight.status === 'critical'
-                    ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.8)]'
-                    : hoveredFlight.status === 'suspicious'
-                    ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.8)]'
-                    : 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]'
-                }`}
-              />
-              <span className="font-bold text-slate-100 text-xs">{hoveredFlight.callsign || 'UNKNOWN'}</span>
-              {hoveredAirline && hoveredAirline.name && (
+        {/* Hover Tooltip (Positioned directly with CSS transform for 0ms lag) */}
+        <div
+          ref={hoverTooltipRef}
+          className="pointer-events-none absolute z-[550] -translate-x-1/2 -translate-y-full mb-2 bg-[#081020]/95 border border-cyan-500/40 rounded-xl px-3 py-2 shadow-2xl backdrop-blur-md text-white font-mono text-[11px] whitespace-nowrap will-change-transform"
+          style={{ display: 'none', left: 0, top: 0 }}
+        >
+          {hoveredFlight && (
+            <>
+              <div className="flex items-center gap-2">
                 <span
-                  className="text-[10px] font-sans font-semibold px-1.5 py-0.5 rounded text-white"
-                  style={{ backgroundColor: `${hoveredAirline.color}33`, borderColor: `${hoveredAirline.color}88`, borderWidth: '1px' }}
-                >
-                  {hoveredAirline.name}
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    hoveredFlight.status === 'critical'
+                      ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.8)]'
+                      : hoveredFlight.status === 'suspicious'
+                      ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.8)]'
+                      : 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]'
+                  }`}
+                />
+                <span className="font-bold text-slate-100 text-xs">{hoveredFlight.callsign || 'UNKNOWN'}</span>
+                {hoveredAirline && hoveredAirline.name && (
+                  <span
+                    className="text-[10px] font-sans font-semibold px-1.5 py-0.5 rounded text-white"
+                    style={{ backgroundColor: `${hoveredAirline.color}33`, borderColor: `${hoveredAirline.color}88`, borderWidth: '1px' }}
+                  >
+                    {hoveredAirline.name}
+                  </span>
+                )}
+                <span className="text-slate-400 text-[10px]">({hoveredFlight.id.toUpperCase()})</span>
+              </div>
+              <div className="text-[10px] text-slate-300 mt-1 flex items-center gap-2">
+                <span>Alt: {formatObservedNumber(hoveredFlight.data_quality, 'altitude', hoveredFlight.altitude)} ft</span>
+                <span>•</span>
+                <span>Spd: {formatObservedNumber(hoveredFlight.data_quality, 'velocity', hoveredFlight.speed)} kt</span>
+                <span>•</span>
+                <span className="text-cyan-300">
+                  Trust: {Number.isFinite(hoveredFlight.trustScore) ? `${hoveredFlight.trustScore}%` : 'N/A'}
                 </span>
-              )}
-              <span className="text-slate-400 text-[10px]">({hoveredFlight.id.toUpperCase()})</span>
-            </div>
-            <div className="text-[10px] text-slate-300 mt-1 flex items-center gap-2">
-              <span>Alt: {formatObservedNumber(hoveredFlight.data_quality, 'altitude', hoveredFlight.altitude)} ft</span>
-              <span>•</span>
-              <span>Spd: {formatObservedNumber(hoveredFlight.data_quality, 'velocity', hoveredFlight.speed)} kt</span>
-              <span>•</span>
-              <span className="text-cyan-300">
-                Trust: {Number.isFinite(hoveredFlight.trustScore) ? `${hoveredFlight.trustScore}%` : 'N/A'}
-              </span>
-            </div>
-          </div>
-        )}
+              </div>
+            </>
+          )}
+        </div>
 
-        {/* Floating Lightweight Flight Label Card (Standard View) */}
+        {/* Floating Lightweight Flight Card (Standard View) */}
         {activeFloatingFlight && !isExpanded && (
-          <div className="airguard-floating-card absolute bottom-5 left-5 z-[500] bg-[#0b1220]/95 backdrop-blur-xl text-white border border-white/15 rounded-2xl p-4 shadow-2xl shadow-black/60 w-[min(23rem,calc(100%-2.5rem))] animate-in fade-in slide-in-from-bottom-3 duration-150">
+          <div className="airguard-floating-card absolute bottom-5 left-5 z-[500] bg-[#081020]/95 backdrop-blur-xl text-white border border-white/15 rounded-2xl p-4 shadow-2xl shadow-black/70 w-[min(23rem,calc(100%-2.5rem))] animate-in fade-in slide-in-from-bottom-3 duration-150">
             <div className="flex items-center justify-between border-b border-white/10 pb-2.5 mb-3">
               <div className="flex items-center gap-2">
                 <span
                   className={`w-2.5 h-2.5 rounded-full ${
                     activeFloatingFlight.status === 'critical'
-                      ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.6)]'
+                      ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.7)]'
                       : activeFloatingFlight.status === 'suspicious'
-                      ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.6)]'
+                      ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.7)]'
                       : activeFloatingFlight.status === 'normal'
-                      ? 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.6)]'
+                      ? 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]'
                       : 'bg-slate-500'
                   }`}
                 />
@@ -981,7 +1112,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                     <span className="font-mono text-base font-bold tracking-wide text-white">
                       {activeFloatingFlight.callsign || 'N/A'}
                     </span>
-                    <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/60 border border-cyan-500/30 px-1.5 py-0.2 rounded">
+                    <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/70 border border-cyan-500/40 px-1.5 py-0.2 rounded font-bold">
                       {activeFloatingFlight.id.toUpperCase()}
                     </span>
                   </div>
@@ -1003,21 +1134,21 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
             </div>
 
             <div className="grid grid-cols-3 gap-2 text-center text-xs mb-3">
-              <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
+              <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-700/40">
                 <div className="text-[9px] uppercase tracking-wider text-slate-400">Altitude</div>
                 <div className="font-mono font-bold text-slate-100">
                   {formatObservedNumber(activeFloatingFlight.data_quality, 'altitude', activeFloatingFlight.altitude)}{' '}
                   <span className="text-[10px] font-normal text-slate-400">FT</span>
                 </div>
               </div>
-              <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
+              <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-700/40">
                 <div className="text-[9px] uppercase tracking-wider text-slate-400">Speed</div>
                 <div className="font-mono font-bold text-slate-100">
                   {formatObservedNumber(activeFloatingFlight.data_quality, 'velocity', activeFloatingFlight.speed)}{' '}
                   <span className="text-[10px] font-normal text-slate-400">KT</span>
                 </div>
               </div>
-              <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
+              <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-700/40">
                 <div className="text-[9px] uppercase tracking-wider text-slate-400">Trust Index</div>
                 <div
                   className={`font-mono font-bold ${
@@ -1044,7 +1175,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                 onSelectFlight(activeFloatingFlight);
                 onOpenFlightDetails(activeFloatingFlight);
               }}
-              className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-900/30 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+              className="w-full py-2.5 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-900/30 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <span>Inspect Telemetry &amp; Detection Matrix</span>
               <span className="text-sm">→</span>
@@ -1052,40 +1183,74 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           </div>
         )}
 
-        {/* Top-Right Control Toolbar: Fullscreen Toggle, Live Count, Follow Mode, 3-Lines Button */}
-        <div className="absolute top-4 right-3 sm:right-4 z-[450] flex flex-col items-end gap-2">
+        {/* Top-Right Control Toolbar */}
+        <div className="airguard-map-controls absolute top-3 right-3 sm:top-4 sm:right-4 z-[450] flex flex-col items-end gap-2 pointer-events-auto">
           <div className="flex items-center gap-2">
+            {/* Map Layer Selector Button */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setIsLayerMenuOpen(v => !v)}
+                aria-label="Select Map Style"
+                title="Change Map Style"
+                className="bg-[#070d1a]/92 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-white/10 hover:border-cyan-400/60 backdrop-blur-xl px-2.5 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
+              >
+                <span>🗺</span>
+                <span className="hidden sm:inline">{MAP_LAYERS[activeMapLayer].name}</span>
+                <span className="text-[10px] text-slate-400">▾</span>
+              </button>
+
+              {isLayerMenuOpen && (
+                <div className="absolute top-full right-0 mt-1.5 w-44 bg-[#081020]/98 border border-cyan-500/30 rounded-xl p-1.5 shadow-2xl backdrop-blur-2xl z-50 animate-in fade-in zoom-in-95 duration-100">
+                  {(Object.keys(MAP_LAYERS) as MapLayerType[]).map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => switchMapLayer(key)}
+                      className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-between transition-all cursor-pointer ${
+                        activeMapLayer === key
+                          ? 'bg-cyan-600/30 text-cyan-200 border border-cyan-500/40'
+                          : 'text-slate-300 hover:bg-white/10'
+                      }`}
+                    >
+                      <span>{MAP_LAYERS[key].name}</span>
+                      {activeMapLayer === key && <span className="text-cyan-400 font-bold">✓</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Fullscreen / Enlarge Map Button */}
             <button
               type="button"
               onClick={toggleFullscreen}
               aria-label={isExpanded ? 'Exit full screen map' : 'Enlarge map to full window'}
               title={isExpanded ? 'Exit full screen (Esc)' : 'Enlarge map to full window'}
-              className="bg-[#0b1220]/95 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-cyan-500/40 hover:border-cyan-400/70 backdrop-blur-xl px-3 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
+              className="bg-[#070d1a]/92 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-cyan-500/40 hover:border-cyan-400/70 backdrop-blur-xl px-3 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
             >
               <span className="text-sm leading-none">{isExpanded ? '🗗' : '⛶'}</span>
               <span className="hidden sm:inline">{isExpanded ? 'Exit Fullscreen' : 'Enlarge Map'}</span>
             </button>
 
-            {/* Live Airspace Count */}
-            <div className="bg-[#0b1220]/90 backdrop-blur-xl px-3 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-2.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.55)] animate-pulse" />
+            {/* Live Airspace Count Badge */}
+            <div className="bg-[#070d1a]/92 backdrop-blur-xl px-3 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-2.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.6)] animate-pulse" />
               <span>Live airspace</span>
-              <span className="text-[11px] text-slate-400 border-l border-white/10 pl-2.5 font-mono">
+              <span className="text-[11px] text-cyan-300 border-l border-white/10 pl-2.5 font-mono font-bold">
                 {flights.length.toLocaleString()}
               </span>
             </div>
 
-            {/* 3-Lines (Hamburger) Button in Fullscreen Mode (Shown when sidebar is hidden) */}
+            {/* 3-Lines (Hamburger) Button in Fullscreen Mode */}
             {isExpanded && !isSidebarOpen && (
               <button
                 type="button"
                 onClick={() => setIsSidebarOpen(true)}
                 aria-label="Open flight details sidebar"
                 title="View flight details & aircraft list (3 lines)"
-                className="airguard-sidebar-toggle-btn bg-cyan-600/90 hover:bg-cyan-500 text-white border border-cyan-400/60 px-3 py-2 rounded-xl text-xs font-semibold shadow-[0_0_15px_rgba(6,182,212,0.4)] backdrop-blur-xl flex items-center gap-2 cursor-pointer transition-all hover:scale-105"
+                className="airguard-sidebar-toggle-btn bg-cyan-600/95 hover:bg-cyan-500 text-white border border-cyan-400/60 px-3 py-2 rounded-xl text-xs font-semibold shadow-[0_0_15px_rgba(6,182,212,0.4)] backdrop-blur-xl flex items-center gap-2 cursor-pointer transition-all hover:scale-105"
               >
-                {/* 3 Lines Icon */}
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="3" y1="6" x2="21" y2="6" />
                   <line x1="3" y1="12" x2="21" y2="12" />
@@ -1101,10 +1266,10 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
               type="button"
               onClick={() => setFollowSelected((val) => !val)}
               aria-pressed={followSelected}
-              className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur-xl transition-all cursor-pointer ${
+              className={`rounded-xl border px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur-xl transition-all cursor-pointer ${
                 followSelected
-                  ? 'border-cyan-400/50 bg-cyan-950/90 text-cyan-200 shadow-[0_0_12px_rgba(6,182,212,0.3)]'
-                  : 'border-white/10 bg-[#0b1220]/90 text-slate-300 hover:text-white'
+                  ? 'border-cyan-400/60 bg-cyan-950/90 text-cyan-200 shadow-[0_0_12px_rgba(6,182,212,0.35)]'
+                  : 'border-white/10 bg-[#070d1a]/90 text-slate-300 hover:text-white'
               }`}
             >
               {followSelected ? '◉ Following aircraft' : '○ Follow aircraft'}
@@ -1112,28 +1277,62 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           )}
         </div>
 
-        {/* Signal Status Legend */}
-        <div className="absolute bottom-4 right-4 z-[450] hidden sm:flex items-center gap-3 bg-[#0b1220]/85 backdrop-blur-xl px-3 py-2 rounded-xl border border-white/10 text-[10px] text-slate-300 shadow-lg">
-          <span className="font-semibold text-slate-500 uppercase tracking-wider">Status</span>
-          <span className="flex items-center gap-1.5">
-            <i className="w-2 h-2 rounded-full bg-sky-400 inline-block shadow-[0_0_6px_rgba(56,189,248,0.5)]" />
-            Nominal
-          </span>
-          <span className="flex items-center gap-1.5">
-            <i className="w-2 h-2 rounded-full bg-amber-400 inline-block shadow-[0_0_6px_rgba(245,158,11,0.5)]" />
-            Review
-          </span>
-          <span className="flex items-center gap-1.5">
-            <i className="w-2 h-2 rounded-full bg-rose-400 inline-block shadow-[0_0_6px_rgba(244,63,94,0.5)]" />
-            Critical
-          </span>
+        {/* Tactile Map Zoom & Orientation Controller (Bottom Right) */}
+        <div className="airguard-map-controls absolute bottom-4 right-4 z-[450] flex flex-col items-end gap-2 pointer-events-auto">
+          {/* Zoom Buttons Group */}
+          <div className="flex flex-col rounded-xl overflow-hidden border border-white/15 bg-[#070d1a]/92 backdrop-blur-xl shadow-xl">
+            <button
+              type="button"
+              onClick={zoomIn}
+              aria-label="Zoom In"
+              title="Zoom In"
+              className="px-3 py-2 hover:bg-white/10 text-slate-200 hover:text-white font-mono text-base font-bold transition-colors cursor-pointer border-b border-white/10"
+            >
+              +
+            </button>
+            <button
+              type="button"
+              onClick={zoomOut}
+              aria-label="Zoom Out"
+              title="Zoom Out"
+              className="px-3 py-2 hover:bg-white/10 text-slate-200 hover:text-white font-mono text-base font-bold transition-colors cursor-pointer border-b border-white/10"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              onClick={resetNorth}
+              aria-label="Reset Orientation to North"
+              title="Reset View (All India)"
+              className="px-2.5 py-2 hover:bg-white/10 text-cyan-300 hover:text-white font-mono text-xs font-bold transition-colors cursor-pointer flex items-center justify-center"
+            >
+              ▲N
+            </button>
+          </div>
+
+          {/* Status Legend Pill */}
+          <div className="hidden sm:flex items-center gap-3 bg-[#070d1a]/90 backdrop-blur-xl px-3 py-1.5 rounded-xl border border-white/10 text-[10px] text-slate-300 shadow-lg font-mono">
+            <span className="font-semibold text-slate-500 uppercase tracking-wider">Status</span>
+            <span className="flex items-center gap-1.5">
+              <i className="w-2 h-2 rounded-full bg-sky-400 inline-block shadow-[0_0_6px_rgba(56,189,248,0.6)]" />
+              Nominal ({nominalCount})
+            </span>
+            <span className="flex items-center gap-1.5">
+              <i className="w-2 h-2 rounded-full bg-amber-400 inline-block shadow-[0_0_6px_rgba(245,158,11,0.6)]" />
+              Review ({reviewCount})
+            </span>
+            <span className="flex items-center gap-1.5">
+              <i className="w-2 h-2 rounded-full bg-rose-400 inline-block shadow-[0_0_6px_rgba(244,63,94,0.6)]" />
+              Critical ({criticalCount})
+            </span>
+          </div>
         </div>
 
-        {/* Geolocation / Nearby Aircraft Drawer */}
-        <div className="absolute bottom-4 left-4 z-[450] w-[min(22rem,calc(100%-2rem))]">
+        {/* Geolocation / Nearby Aircraft Drawer (Bottom Left) */}
+        <div className="airguard-map-controls absolute bottom-4 left-4 z-[450] w-[min(22rem,calc(100%-2rem))] pointer-events-auto">
           {isNearbyOpen && (
             <section
-              className="mb-2 overflow-hidden rounded-xl border border-slate-700/80 bg-[#08111f]/[.97] shadow-2xl backdrop-blur-xl"
+              className="mb-2 overflow-hidden rounded-2xl border border-slate-700/80 bg-[#08111f]/[.98] shadow-2xl backdrop-blur-2xl"
               aria-label="Nearby aircraft"
             >
               <div className="flex items-center justify-between border-b border-white/10 px-3.5 py-3">
@@ -1163,13 +1362,13 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                       type="button"
                       onClick={locateNearbyAircraft}
                       disabled={nearbyStatus === 'loading'}
-                      className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-60 cursor-pointer"
+                      className="rounded-xl border border-cyan-500/40 bg-cyan-500/15 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-60 cursor-pointer transition-all"
                     >
                       {nearbyStatus === 'loading' ? 'Finding your location…' : 'Use my location'}
                     </button>
                     {nearbyStatus === 'error' && (
                       <p role="status" className="mb-0 mt-2 text-[10px] text-amber-300">
-                        Location is unavailable. Allow location access and try again, or check browser location settings.
+                        Location is unavailable. Allow location access and try again.
                       </p>
                     )}
                   </div>
@@ -1186,7 +1385,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                     </div>
                     {nearbyFlights.length === 0 ? (
                       <p className="px-1 py-3 text-xs text-slate-400">
-                        No aircraft reports within 120 km in the current feed. Coverage and transponder visibility vary by area.
+                        No aircraft reports within 120 km in the current feed.
                       </p>
                     ) : (
                       nearbyFlights.map(({ flight, distance, airline }) => {
@@ -1201,7 +1400,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                               setFollowSelected(true);
                               if (isExpanded) setIsSidebarOpen(true);
                             }}
-                            className="mb-1.5 flex w-full items-center justify-between gap-3 rounded-lg border border-white/[.08] bg-white/[.03] px-3 py-2 text-left hover:border-cyan-500/40 hover:bg-cyan-500/[.06] cursor-pointer"
+                            className="mb-1.5 flex w-full items-center justify-between gap-3 rounded-xl border border-white/[.08] bg-white/[.03] px-3 py-2 text-left hover:border-cyan-500/40 hover:bg-cyan-500/[.08] cursor-pointer transition-all"
                           >
                             <span className="min-w-0">
                               <span className="block truncate text-xs font-semibold text-slate-100">
@@ -1234,14 +1433,14 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
               setActiveFloatingFlight(null);
             }}
             aria-expanded={isNearbyOpen}
-            className="flex items-center gap-2 rounded-lg border border-white/15 bg-[#0b1220]/95 px-3 py-2.5 text-xs font-semibold text-slate-100 shadow-xl backdrop-blur-xl hover:border-cyan-400/50 hover:text-cyan-100 cursor-pointer"
+            className="flex items-center gap-2 rounded-xl border border-white/15 bg-[#070d1a]/95 px-3 py-2.5 text-xs font-semibold text-slate-100 shadow-xl backdrop-blur-xl hover:border-cyan-400/50 hover:text-cyan-100 cursor-pointer transition-all"
           >
             <span aria-hidden="true" className="text-cyan-300">
               ◎
             </span>
             Aircraft near me
             {nearbyLocation && (
-              <span className="rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[9px] text-cyan-200">
+              <span className="rounded-full bg-cyan-500/20 px-1.5 py-0.5 text-[9px] text-cyan-200">
                 {nearbyFlights.length}
               </span>
             )}
@@ -1251,9 +1450,9 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
 
       {/* Enlarged Map Right Sidebar (Appears ONLY on clicking 3 lines or clicking a flight) */}
       {isExpanded && isSidebarOpen && (
-        <aside className="airguard-expanded-sidebar w-full md:w-[380px] lg:w-[420px] xl:w-[450px] shrink-0 h-full bg-[#081020]/98 border-t md:border-t-0 md:border-l border-cyan-500/20 backdrop-blur-2xl flex flex-col z-[460] shadow-2xl overflow-hidden animate-in slide-in-from-right duration-200 select-text">
+        <aside className="airguard-expanded-sidebar w-full md:w-[380px] lg:w-[420px] xl:w-[450px] shrink-0 h-full bg-[#070d1a]/98 border-t md:border-t-0 md:border-l border-cyan-500/20 backdrop-blur-2xl flex flex-col z-[460] shadow-2xl overflow-hidden animate-in slide-in-from-right duration-200 select-text">
           {/* Sidebar Header */}
-          <div className="flex items-center justify-between border-b border-white/10 px-4 py-3 bg-[#0b1426]/90 shrink-0">
+          <div className="flex items-center justify-between border-b border-white/10 px-4 py-3 bg-[#0a1224]/90 shrink-0">
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.8)] animate-pulse" />
               <h2 className="text-sm font-semibold text-white tracking-wide m-0">
@@ -1290,7 +1489,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
             {activeDetailedFlight ? (
               <>
                 {/* 1. Target Identity & Airline Banner */}
-                <div className="bg-[#0b1424] border border-cyan-500/30 rounded-xl p-3.5 shadow-lg relative overflow-hidden">
+                <div className="bg-[#0b1424] border border-cyan-500/30 rounded-2xl p-3.5 shadow-lg relative overflow-hidden">
                   <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 rounded-full blur-2xl pointer-events-none" />
                   <div className="flex items-start justify-between gap-2 relative z-10">
                     <div>
@@ -1334,7 +1533,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                 </div>
 
                 {/* 2. Trust Score Hero Card */}
-                <div className="bg-[#0c1626] border border-white/10 rounded-xl p-3.5 shadow-md">
+                <div className="bg-[#0c1626] border border-white/10 rounded-2xl p-3.5 shadow-md">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Signal Trust Index</span>
                     <span
@@ -1435,7 +1634,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                   </div>
                 </div>
 
-                {/* 5. Route Information (if available) */}
+                {/* 5. Route Information */}
                 {(activeDetailedFlight.estDepartureAirport || activeDetailedFlight.estArrivalAirport) && (
                   <div className="bg-[#0b1424] border border-white/[0.08] p-3 rounded-xl">
                     <span className="text-[10px] text-slate-400 uppercase font-semibold block mb-1">Estimated Route</span>
@@ -1501,13 +1700,13 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                   )}
                 </div>
 
-                <div className="flex gap-1.5 bg-[#0b1426] p-1 rounded-lg border border-white/10 text-xs">
+                <div className="flex gap-1.5 bg-[#0a1222] p-1 rounded-xl border border-white/10 text-xs">
                   {(['all', 'suspicious', 'critical'] as const).map((filter) => (
                     <button
                       key={filter}
                       type="button"
                       onClick={() => setSidebarFilter(filter)}
-                      className={`flex-1 py-1 rounded text-[11px] font-semibold transition-all capitalize cursor-pointer ${
+                      className={`flex-1 py-1 rounded-lg text-[11px] font-semibold transition-all capitalize cursor-pointer ${
                         sidebarFilter === filter
                           ? 'bg-cyan-600 text-white shadow-md'
                           : 'text-slate-400 hover:text-slate-200'
@@ -1597,11 +1796,9 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   );
 
   // If enlarged to full window, use React Portal to mount directly on document.body
-  // This completely escapes any parent CSS transform, overflow clips, or grid restrictions on any page!
   if (isExpanded) {
     return (
       <>
-        {/* In-flow placeholder to maintain layout space when map is portaled */}
         <div className="relative w-full h-full min-h-[360px] bg-[#070c18] rounded-xl border border-slate-800 flex items-center justify-center text-slate-500 font-mono text-xs">
           <span>Map enlarged to full window (Press Esc or Exit Fullscreen to return)</span>
         </div>
@@ -1612,3 +1809,4 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
 
   return mapContent;
 };
+
