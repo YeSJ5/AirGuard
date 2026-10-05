@@ -4458,10 +4458,10 @@ export default function App() {
       {/* One clear focal point per tool. Muted neutral controls.                   */}
       {/* ========================================================================= */}
       {currentTier === 'tier3_tools' && (
-        <div className="flex-1 flex flex-col min-h-0 relative z-10 px-4 md:px-6 py-4">
+        <div className={`flex-1 flex flex-col min-h-0 relative z-10 ${tier3Tab === 'playback' ? 'px-2 sm:px-4 pt-2 pb-2 h-full overflow-hidden' : 'px-4 md:px-6 py-4'}`}>
 
           {/* Shared workspace header and navigation */}
-          <div className="flex flex-wrap items-center justify-between border-b border-slate-800 pb-3 mb-4 gap-3">
+          <div className={`flex flex-wrap items-center justify-between border-b border-slate-800 ${tier3Tab === 'playback' ? 'pb-2 mb-2' : 'pb-3 mb-4'} gap-3`}>
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setCurrentTier('tier2_radar')}
@@ -5289,7 +5289,7 @@ export default function App() {
       )}
 
       {/* --- Footer --- */}
-      <footer className="border-t border-slate-800 bg-[#060913] px-6 py-2 flex items-center justify-between text-[10px] text-slate-500 relative z-20 font-normal">
+      <footer className={`border-t border-slate-800 bg-[#060913] px-6 py-2 items-center justify-between text-[10px] text-slate-500 relative z-20 font-normal ${tier3Tab === 'playback' && currentTier === 'tier3_tools' ? 'hidden' : 'flex'}`}>
         <div>AirGuard · Airspace Trust &amp; Threat Intelligence</div>
         <div className="flex items-center gap-4">
           <button onClick={() => { setCurrentTier('tier3_tools'); setTier3Tab('about'); }} className="hover:text-slate-300 transition-colors">Product guide</button>
