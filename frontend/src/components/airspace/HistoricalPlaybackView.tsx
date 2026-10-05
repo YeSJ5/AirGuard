@@ -322,7 +322,7 @@ export const HistoricalPlaybackView: React.FC = () => {
   // Replay animation loop
   useEffect(() => {
     if (!isPlaying || timeline.length < 2) return;
-    const intervalMs = Math.max(50, Math.round(600 / speed));
+    const intervalMs = Math.max(40, Math.round(600 / speed));
     const timer = window.setInterval(() => {
       setSelectedTime((index) => {
         if (index >= timeline.length - 1) {
@@ -335,6 +335,47 @@ export const HistoricalPlaybackView: React.FC = () => {
     }, intervalMs);
     return () => window.clearInterval(timer);
   }, [isPlaying, timeline.length, speed, isLooping]);
+
+  // Global Keyboard Shortcuts for Playback (Space: Play/Pause, Arrows: Step, [ ]: Speed, F: Follow)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept if user is typing in an input
+      const target = e.target as HTMLElement;
+      if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        setIsPlaying((v) => !v);
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        setIsPlaying(false);
+        setSelectedTime((v) => Math.max(0, v - (e.shiftKey ? 10 : 1)));
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        setIsPlaying(false);
+        setSelectedTime((v) => Math.min(timeline.length - 1, v + (e.shiftKey ? 10 : 1)));
+      } else if (e.code === 'Home') {
+        e.preventDefault();
+        setIsPlaying(false);
+        setSelectedTime(0);
+      } else if (e.code === 'End') {
+        e.preventDefault();
+        setIsPlaying(false);
+        setSelectedTime(timeline.length - 1);
+      } else if (e.key === 'f' || e.key === 'F') {
+        setIsFollowing((v) => !v);
+      } else if (e.key === 's' || e.key === 'S') {
+        setIsSidebarOpen((v) => !v);
+      } else if (e.key === '[') {
+        setSpeed((s) => (s === 8 ? 4 : s === 4 ? 2 : s === 2 ? 1 : 0.5));
+      } else if (e.key === ']') {
+        setSpeed((s) => (s === 0.5 ? 1 : s === 1 ? 2 : s === 2 ? 4 : 8));
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [timeline.length]);
 
   const handleFormSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -366,8 +407,11 @@ export const HistoricalPlaybackView: React.FC = () => {
   const frameLabelLocal = frameDate ? frameDate.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' }) : 'No frame selected';
   const frameLabelUtc = frameDate ? frameDate.toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : '';
 
+  // Progress percentage
+  const progressPct = timeline.length > 1 ? Math.round((selectedTime / (timeline.length - 1)) * 100) : 0;
+
   return (
-    <section className="flex h-full flex-1 flex-col min-h-0 overflow-hidden rounded-2xl border border-white/10 bg-[#080d18] shadow-2xl relative" aria-label="Recorded aircraft playback">
+    <section className="flex h-full flex-1 flex-col min-h-0 overflow-hidden rounded-2xl border border-white/10 bg-[#080d18] shadow-2xl relative select-none" aria-label="Recorded aircraft playback">
       {/* Top Playback Toolbar (Time Presets + Custom Datetime + Sidebar Toggle) */}
       <header className="flex flex-wrap items-center justify-between gap-2.5 border-b border-white/[.08] px-4 py-2.5 bg-[#0a101d] shrink-0 z-20">
         <div className="flex items-center gap-3">
@@ -438,7 +482,7 @@ export const HistoricalPlaybackView: React.FC = () => {
                 ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-200'
                 : 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300'
             }`}
-            title={isSidebarOpen ? 'Hide Replay Sidebar' : 'Show Replay Sidebar'}
+            title={isSidebarOpen ? 'Hide Replay Sidebar (S)' : 'Show Replay Sidebar (S)'}
           >
             <span>☰</span>
             <span className="hidden sm:inline">Playback Sidebar</span>
@@ -707,9 +751,10 @@ export const HistoricalPlaybackView: React.FC = () => {
                       onClick={() => setIsFollowing((v) => !v)}
                       className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
                         isFollowing
-                          ? 'bg-cyan-500 text-slate-950'
+                          ? 'bg-cyan-500 text-slate-950 shadow-md'
                           : 'bg-white/10 text-slate-400 hover:text-white'
                       }`}
+                      title="Toggle camera follow mode (F key)"
                     >
                       {isFollowing ? '◉ Following Active' : '○ Follow OFF'}
                     </button>
@@ -878,7 +923,7 @@ export const HistoricalPlaybackView: React.FC = () => {
                 setSelectedTime(0);
               }}
               className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10 disabled:opacity-40 cursor-pointer"
-              title="Jump to first frame"
+              title="Jump to first frame (Home)"
             >
               ⏮
             </button>
@@ -891,7 +936,7 @@ export const HistoricalPlaybackView: React.FC = () => {
                 setSelectedTime((v) => Math.max(0, v - 1));
               }}
               className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10 disabled:opacity-40 cursor-pointer"
-              title="Step backwards"
+              title="Step backwards (← key)"
             >
               ◀
             </button>
@@ -901,6 +946,7 @@ export const HistoricalPlaybackView: React.FC = () => {
               disabled={timeline.length < 2}
               onClick={() => setIsPlaying((v) => !v)}
               className="min-w-20 rounded-lg border border-cyan-400/40 bg-cyan-500/20 px-3 py-1 text-xs font-bold text-cyan-200 hover:bg-cyan-500/30 disabled:opacity-40 cursor-pointer shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+              title="Play / Pause (Spacebar)"
             >
               {isPlaying ? '⏸ Pause' : '▶ Play'}
             </button>
@@ -913,7 +959,7 @@ export const HistoricalPlaybackView: React.FC = () => {
                 setSelectedTime((v) => Math.min(timeline.length - 1, v + 1));
               }}
               className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10 disabled:opacity-40 cursor-pointer"
-              title="Step forward"
+              title="Step forward (→ key)"
             >
               ▶
             </button>
@@ -926,7 +972,7 @@ export const HistoricalPlaybackView: React.FC = () => {
                 setSelectedTime(timeline.length - 1);
               }}
               className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 hover:bg-white/10 disabled:opacity-40 cursor-pointer"
-              title="Jump to latest frame"
+              title="Jump to latest frame (End)"
             >
               ⏭
             </button>
@@ -941,6 +987,7 @@ export const HistoricalPlaybackView: React.FC = () => {
                   className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded cursor-pointer ${
                     speed === s ? 'bg-cyan-500/30 text-cyan-300' : 'text-slate-400 hover:text-slate-200'
                   }`}
+                  title={`Playback speed ${s}x ([ / ] keys)`}
                 >
                   {s}x
                 </button>
@@ -962,21 +1009,26 @@ export const HistoricalPlaybackView: React.FC = () => {
             </button>
           </div>
 
-          {/* Timeline Scrubber Slider */}
-          <div className="flex flex-1 items-center gap-2 min-w-[240px]">
-            <input
-              aria-label="Playback timeline scrubber"
-              type="range"
-              min={0}
-              max={Math.max(0, timeline.length - 1)}
-              value={Math.min(selectedTime, Math.max(0, timeline.length - 1))}
-              onChange={(event) => {
-                setIsPlaying(false);
-                setSelectedTime(Number(event.target.value));
-              }}
-              disabled={timeline.length < 2}
-              className="w-full accent-cyan-400 cursor-pointer disabled:opacity-40 h-2 bg-slate-800 rounded-lg appearance-none"
-            />
+          {/* Timeline Scrubber Slider with Visual Density & Percentage */}
+          <div className="flex flex-1 items-center gap-3 min-w-[240px]">
+            <span className="text-[10px] font-mono text-slate-500 shrink-0">
+              {progressPct}%
+            </span>
+            <div className="relative flex-1 flex items-center">
+              <input
+                aria-label="Playback timeline scrubber"
+                type="range"
+                min={0}
+                max={Math.max(0, timeline.length - 1)}
+                value={Math.min(selectedTime, Math.max(0, timeline.length - 1))}
+                onChange={(event) => {
+                  setIsPlaying(false);
+                  setSelectedTime(Number(event.target.value));
+                }}
+                disabled={timeline.length < 2}
+                className="w-full accent-cyan-400 cursor-pointer disabled:opacity-40 h-2 bg-slate-800 rounded-lg appearance-none"
+              />
+            </div>
           </div>
         </div>
 

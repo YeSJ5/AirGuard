@@ -424,17 +424,51 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
 
       const history = (flight.history || []).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
       if (history.length > 1) {
+        // 1. Glowing background aura for the path
         ctx.beginPath();
         for (let j = 0; j < history.length; j++) {
           const hp = map.latLngToContainerPoint([history[j].lat, history[j].lng]);
           if (j === 0) ctx.moveTo(hp.x, hp.y);
           else ctx.lineTo(hp.x, hp.y);
         }
-        ctx.strokeStyle = 'rgba(56, 189, 248, 0.75)';
-        ctx.lineWidth = 2.5;
-        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = color === '#ef4444' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(6, 182, 212, 0.25)';
+        ctx.lineWidth = 6;
+        ctx.stroke();
+
+        // 2. Crisp dashed trajectory line
+        ctx.beginPath();
+        for (let j = 0; j < history.length; j++) {
+          const hp = map.latLngToContainerPoint([history[j].lat, history[j].lng]);
+          if (j === 0) ctx.moveTo(hp.x, hp.y);
+          else ctx.lineTo(hp.x, hp.y);
+        }
+        ctx.strokeStyle = color === '#ef4444' ? 'rgba(239, 68, 68, 0.95)' : 'rgba(56, 189, 248, 0.95)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
         ctx.stroke();
         ctx.setLineDash([]);
+
+        // 3. Waypoint fix nodes along the trail
+        const step = Math.max(1, Math.floor(history.length / 20));
+        for (let j = 0; j < history.length - 1; j += step) {
+          const hp = map.latLngToContainerPoint([history[j].lat, history[j].lng]);
+          ctx.beginPath();
+          ctx.arc(hp.x, hp.y, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = j === 0 ? '#38bdf8' : 'rgba(56, 189, 248, 0.65)';
+          ctx.fill();
+        }
+
+        // 4. Origin Departure halo marker at history[0]
+        if (history.length > 2) {
+          const startPt = map.latLngToContainerPoint([history[0].lat, history[0].lng]);
+          ctx.beginPath();
+          ctx.arc(startPt.x, startPt.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = '#06b6d4';
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
       }
 
       const heading = Number.isFinite(flight.heading) ? flight.heading : 0;
