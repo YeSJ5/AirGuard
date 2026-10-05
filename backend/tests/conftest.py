@@ -18,7 +18,9 @@ async def isolated_postgres_schema():
     try:
         connection = await engine.connect()
     except SQLAlchemyError as exc:
-        pytest.skip(f"PostgreSQL integration database is unavailable: {type(exc).__name__}")
+        pytest.skip(
+            f"PostgreSQL integration database is unavailable: {type(exc).__name__}"
+        )
 
     transaction = await connection.begin()
     schema_name = f"airguard_test_{uuid4().hex}"

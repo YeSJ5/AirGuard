@@ -8,7 +8,6 @@ import httpx
 
 from app.core.config import settings
 
-
 TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
 
 
@@ -25,7 +24,9 @@ class OpenSkyAuth:
     def configured(self) -> bool:
         return bool(self.client_id and self.client_secret)
 
-    async def _get_token(self, force_refresh: bool = False, rejected_token: str | None = None) -> str | None:
+    async def _get_token(
+        self, force_refresh: bool = False, rejected_token: str | None = None
+    ) -> str | None:
         if not self.configured:
             return None
         if not force_refresh and self._token and time.monotonic() < self._expires_at:
@@ -35,9 +36,18 @@ class OpenSkyAuth:
             # Another request may already have replaced a token that was rejected
             # on the caller's request; reuse that fresh token instead of racing a
             # second OAuth exchange.
-            if rejected_token and self._token and self._token != rejected_token and time.monotonic() < self._expires_at:
+            if (
+                rejected_token
+                and self._token
+                and self._token != rejected_token
+                and time.monotonic() < self._expires_at
+            ):
                 return self._token
-            if not force_refresh and self._token and time.monotonic() < self._expires_at:
+            if (
+                not force_refresh
+                and self._token
+                and time.monotonic() < self._expires_at
+            ):
                 return self._token
             response = await self._token_client.post(
                 TOKEN_URL,
@@ -52,13 +62,19 @@ class OpenSkyAuth:
             payload = response.json()
             token = payload.get("access_token")
             if not isinstance(token, str) or not token:
-                raise RuntimeError("OpenSky token response did not contain an access token")
+                raise RuntimeError(
+                    "OpenSky token response did not contain an access token"
+                )
             lifetime = max(60, int(payload.get("expires_in", 1800)))
             self._token = token
-            self._expires_at = time.monotonic() + max(1, lifetime - min(60, lifetime // 10))
+            self._expires_at = time.monotonic() + max(
+                1, lifetime - min(60, lifetime // 10)
+            )
             return token
 
-    async def request(self, client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    async def request(
+        self, client: httpx.AsyncClient, method: str, url: str, **kwargs: Any
+    ) -> httpx.Response:
         headers = dict(kwargs.pop("headers", {}) or {})
         token = await self._get_token()
         if token:

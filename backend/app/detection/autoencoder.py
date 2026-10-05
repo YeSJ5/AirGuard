@@ -1,31 +1,29 @@
+import logging
 import math
 import os
-import logging
-import torch
-import torch.nn as nn
+from typing import Any
+
 import numpy as np
-from typing import List, Dict, Any, Tuple, Optional
+import torch
+from torch import nn
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "autoencoder.pth")
 
 # --- Autoencoder Network Architecture ---
 
+
 class AutoencoderModel(nn.Module):
     def __init__(self, input_dim: int = 4, latent_dim: int = 3):
-        super(AutoencoderModel, self).__init__()
+        super().__init__()
         # Compression layers
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 8),
-            nn.ReLU(),
-            nn.Linear(8, latent_dim)
+            nn.Linear(input_dim, 8), nn.ReLU(), nn.Linear(8, latent_dim)
         )
         # Reconstruction layers
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 8),
-            nn.ReLU(),
-            nn.Linear(8, input_dim)
+            nn.Linear(latent_dim, 8), nn.ReLU(), nn.Linear(8, input_dim)
         )
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decoder(self.encoder(x))
 
@@ -41,12 +39,16 @@ class UnsupervisedAutoencoder:
         """Loads weights from disk if trained file exists."""
         if os.path.exists(MODEL_PATH):
             try:
-                self.model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu", weights_only=True))
+                self.model.load_state_dict(
+                    torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
+                )
                 self.model.eval()
                 self.is_available = True
             except Exception as exc:
                 self.is_available = False
-                logging.getLogger("airguard.detection").warning("Autoencoder weights could not be loaded: %s", exc)
+                logging.getLogger("airguard.detection").warning(
+                    "Autoencoder weights could not be loaded: %s", exc
+                )
 
     def compute_anomaly_score(self, features: np.ndarray) -> float | None:
         """Calculate reconstruction MSE on normalized kinematic features and scale to 0-1 probability score.
@@ -67,7 +69,9 @@ class UnsupervisedAutoencoder:
         dt_val = float(features[3]) if len(features) > 3 else 5.0
         dt_norm = min(3.0, max(0.0, (dt_val - 5.0) / 10.0))
 
-        norm_vector = np.array([spd_norm, hdg_norm, alt_norm, dt_norm], dtype=np.float32)
+        norm_vector = np.array(
+            [spd_norm, hdg_norm, alt_norm, dt_norm], dtype=np.float32
+        )
         tensor_features = torch.FloatTensor(norm_vector.reshape(1, -1))
 
         with torch.no_grad():
@@ -84,33 +88,37 @@ class UnsupervisedAutoencoder:
 
 # --- Trilateration Plausibility Check ---
 
+
 def check_trilateration_plausibility(
-    aircraft_lat: float,
-    aircraft_lon: float,
-    sensors: List[str]
-) -> Tuple[None, str, Dict[str, Any]]:
+    aircraft_lat: float, aircraft_lon: float, sensors: list[str]
+) -> tuple[None, str, dict[str, Any]]:
     """Return unavailable until calibrated, time-synchronized receiver observations exist.
 
     OpenSky's public state vector may include sensor identifiers, but AirGuard does not
     have an authorized station registry or per-receiver timing/range observations. A
     location-only station lookup cannot establish multilateration or receiver consistency.
     """
-    return None, "unavailable", {
-        "reason": "No calibrated receiver observations are configured.",
-        "receiver_ids_supplied": len(sensors or []),
-        "receiver_geometry_available": False,
-    }
+    return (
+        None,
+        "unavailable",
+        {
+            "reason": "No calibrated receiver observations are configured.",
+            "receiver_ids_supplied": len(sensors or []),
+            "receiver_geometry_available": False,
+        },
+    )
 
 
 # --- Combined Scoring Logic ---
 
+
 def combine_scores(
-    rule_flags: List[bool | None],
+    rule_flags: list[bool | None],
     ensemble_score: float | None,
     autoencoder_score: float | None,
     trilateration_consistency: float | None,
-    threshold: float = 0.7
-) -> Tuple[Optional[float], bool]:
+    threshold: float = 0.7,
+) -> tuple[float | None, bool]:
     """Fuse only available evidence; missing models/receivers contribute no fabricated pass."""
     assessed_rules = [flag for flag in rule_flags if flag is not None]
     weighted_signals = []
@@ -126,13 +134,15 @@ def combine_scores(
     if not weighted_signals:
         return None, False
     total_weight = sum(weight for weight, _ in weighted_signals)
-    combined_risk = sum(weight * score for weight, score in weighted_signals) / total_weight
+    combined_risk = (
+        sum(weight * score for weight, score in weighted_signals) / total_weight
+    )
     combined_risk = min(1.0, max(0.0, combined_risk))
     return combined_risk, combined_risk >= threshold
 
 
 def compute_evidence_confidence(
-    rule_flags: List[bool | None],
+    rule_flags: list[bool | None],
     ensemble_score: float | None,
     autoencoder_score: float | None,
     trilateration_consistency: float | None,
@@ -149,4 +159,3 @@ def compute_evidence_confidence(
     if trilateration_consistency is not None:
         available_weight += 0.10
     return round(min(1.0, max(0.0, available_weight)), 2)
-

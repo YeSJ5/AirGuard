@@ -1,13 +1,15 @@
-import pytest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, AsyncMock, patch
-from httpx import AsyncClient, ASGITransport, Response
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.main import app
-from app.models import AircraftState, AircraftAssessment, Alert, User, FlightRoute
-from app.core.database import get_db
+import pytest
+from httpx import ASGITransport, AsyncClient, Response
+
 from app.api.deps import get_current_user, require_viewer
+from app.core.database import get_db
 from app.ingestion.route_service import FlightRouteService, get_airport_coordinates
+from app.main import app
+from app.models import AircraftAssessment, AircraftState, Alert, User
+
 
 def _mock_db_session():
     result = MagicMock()
@@ -22,15 +24,19 @@ def _mock_db_session():
 def mock_db():
     return _mock_db_session()
 
+
 @pytest.fixture(autouse=True)
 def override_deps(mock_db):
     mock_user = User(id=1, email="analyst@airguard.sec", role="analyst")
     app.dependency_overrides[get_db] = lambda: mock_db
     app.dependency_overrides[get_current_user] = lambda: mock_user
     app.dependency_overrides[require_viewer] = lambda: mock_user
-    with patch("app.api.v1.endpoints.redis_client.get", new=AsyncMock(return_value=None)):
+    with patch(
+        "app.api.v1.endpoints.redis_client.get", new=AsyncMock(return_value=None)
+    ):
         yield
     app.dependency_overrides.clear()
+
 
 def test_airport_coordinate_lookup():
     del_coords = get_airport_coordinates("VIDP")
@@ -48,6 +54,7 @@ def test_airport_coordinate_lookup():
     unknown_coords = get_airport_coordinates("ZZZZ")
     assert unknown_coords is None
 
+
 @pytest.mark.asyncio
 async def test_route_service_fetch_and_cache():
     mock_session_maker = MagicMock()
@@ -55,7 +62,7 @@ async def test_route_service_fetch_and_cache():
     mock_session_maker.return_value.__aenter__.return_value = mock_session
 
     service = FlightRouteService(mock_session_maker)
-    
+
     # Mock OpenSky /api/flights/aircraft 200 response with flight data
     mock_flight_payload = [
         {
@@ -68,14 +75,15 @@ async def test_route_service_fetch_and_cache():
         }
     ]
 
-    mock_resp = Response(
-        status_code=200,
-        json=mock_flight_payload,
-        request=MagicMock()
-    )
+    mock_resp = Response(status_code=200, json=mock_flight_payload, request=MagicMock())
 
-    with patch("app.ingestion.opensky_auth.opensky_auth.request", AsyncMock(return_value=mock_resp)):
-        route = await service.get_or_fetch_route("800539", callsign="SEJ123", db=mock_session)
+    with patch(
+        "app.ingestion.opensky_auth.opensky_auth.request",
+        AsyncMock(return_value=mock_resp),
+    ):
+        route = await service.get_or_fetch_route(
+            "800539", callsign="SEJ123", db=mock_session
+        )
 
     assert route["icao24"] == "800539"
     assert route["est_departure_airport"] == "VIDP"
@@ -87,10 +95,13 @@ async def test_route_service_fetch_and_cache():
     assert route["arr_lng"] == 72.8656
 
     # Test in-memory cache hit: second call does not call OpenSky HTTP
-    with patch("app.ingestion.opensky_auth.opensky_auth.request", AsyncMock()) as mock_get:
+    with patch(
+        "app.ingestion.opensky_auth.opensky_auth.request", AsyncMock()
+    ) as mock_get:
         cached = await service.get_or_fetch_route("800539")
         assert cached == route
         mock_get.assert_not_called()
+
 
 @pytest.mark.asyncio
 async def test_route_service_fallback_when_route_unknown():
@@ -101,14 +112,15 @@ async def test_route_service_fallback_when_route_unknown():
     service = FlightRouteService(mock_session_maker)
 
     # Mock OpenSky 404 (coverage partial, no flight record found)
-    mock_resp = Response(
-        status_code=404,
-        text="Not found",
-        request=MagicMock()
-    )
+    mock_resp = Response(status_code=404, text="Not found", request=MagicMock())
 
-    with patch("app.ingestion.opensky_auth.opensky_auth.request", AsyncMock(return_value=mock_resp)):
-        route = await service.get_or_fetch_route("a1b2c3", callsign="UNKNOWN1", db=mock_session)
+    with patch(
+        "app.ingestion.opensky_auth.opensky_auth.request",
+        AsyncMock(return_value=mock_resp),
+    ):
+        route = await service.get_or_fetch_route(
+            "a1b2c3", callsign="UNKNOWN1", db=mock_session
+        )
 
     assert route["icao24"] == "a1b2c3"
     assert route["est_departure_airport"] is None
@@ -116,6 +128,7 @@ async def test_route_service_fallback_when_route_unknown():
     assert route["route_text"] == "Route unknown"
     assert route["dep_lat"] is None
     assert route["arr_lat"] is None
+
 
 @pytest.mark.asyncio
 async def test_aircraft_detail_endpoint_normal_flow(mock_db):
@@ -134,7 +147,7 @@ async def test_aircraft_detail_endpoint_normal_flow(mock_db):
         received_at=now,
         source="opensky",
         reported_nic=8,
-        is_synthetic=False
+        is_synthetic=False,
     )
 
     # 1st query: AircraftState
@@ -148,9 +161,14 @@ async def test_aircraft_detail_endpoint_normal_flow(mock_db):
 
     res_assessment = MagicMock()
     res_assessment.scalar_one_or_none.return_value = AircraftAssessment(
-        aircraft_state_id=10, icao24="800539", combined_risk_score=0.05,
-        rule_assessment_coverage=1.0, status="SCORED", signals={},
-        detector_version="rules-v2", assessed_at=now,
+        aircraft_state_id=10,
+        icao24="800539",
+        combined_risk_score=0.05,
+        rule_assessment_coverage=1.0,
+        status="SCORED",
+        signals={},
+        detector_version="rules-v2",
+        assessed_at=now,
     )
     res_first_seen = MagicMock()
     res_first_seen.scalar_one_or_none.return_value = now
@@ -171,7 +189,7 @@ async def test_aircraft_detail_endpoint_normal_flow(mock_db):
         "dep_lat": 28.5562,
         "dep_lng": 77.1000,
         "arr_lat": 19.0896,
-        "arr_lng": 72.8656
+        "arr_lng": 72.8656,
     }
 
     mock_route_svc = MagicMock()
@@ -207,6 +225,7 @@ async def test_aircraft_detail_endpoint_normal_flow(mock_db):
     # 4. First seen session
     assert data["first_seen_session"] is not None
 
+
 @pytest.mark.asyncio
 async def test_aircraft_detail_endpoint_flagged_with_unknown_route(mock_db):
     now = datetime.now(timezone.utc)
@@ -224,7 +243,7 @@ async def test_aircraft_detail_endpoint_flagged_with_unknown_route(mock_db):
         received_at=now,
         source="opensky",
         reported_nic=2,
-        is_synthetic=False
+        is_synthetic=False,
     )
 
     mock_alert = Alert(
@@ -237,14 +256,12 @@ async def test_aircraft_detail_endpoint_flagged_with_unknown_route(mock_db):
         combined_risk_score=0.91,
         reason_text="Impossible descent rate; Speed mismatch",
         shap_explanation={
-            "evidence": {
-                "rule_flags": {"climb_rate": True, "alt_vel_mismatch": True}
-            },
-            "shap": {"climb_vector": 0.85}
+            "evidence": {"rule_flags": {"climb_rate": True, "alt_vel_mismatch": True}},
+            "shap": {"climb_vector": 0.85},
         },
         detected_at=now,
         is_synthetic=True,
-        acknowledged=False
+        acknowledged=False,
     )
 
     res_state = MagicMock()
@@ -275,7 +292,7 @@ async def test_aircraft_detail_endpoint_flagged_with_unknown_route(mock_db):
         "dep_lat": None,
         "dep_lng": None,
         "arr_lat": None,
-        "arr_lng": None
+        "arr_lng": None,
     }
 
     mock_route_svc = MagicMock()
@@ -294,7 +311,9 @@ async def test_aircraft_detail_endpoint_flagged_with_unknown_route(mock_db):
     assert data["route"]["est_arrival_airport"] is None
 
     # Trust status flagged confirmed
-    assert data["trust_status"]["status_text"] == "Flagged — signal inconsistency detected"
+    assert (
+        data["trust_status"]["status_text"] == "Flagged — signal inconsistency detected"
+    )
     assert data["trust_status"]["is_flagged"] is True
     assert data["trust_status"]["combined_risk_score"] >= 0.8
     assert "climb_rate" in data["trust_status"]["rule_flags"]

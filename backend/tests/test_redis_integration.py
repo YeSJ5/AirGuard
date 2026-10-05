@@ -1,4 +1,5 @@
 """Isolated Redis Streams integration checks; never touches production keys."""
+
 import json
 import uuid
 

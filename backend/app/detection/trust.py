@@ -1,8 +1,7 @@
-from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 
-def derive_trust_score(combined_risk_score: Optional[float]) -> Optional[float]:
+def derive_trust_score(combined_risk_score: float | None) -> float | None:
     """Canonical derivation of Telemetry Trust Index (0-100 scale) from detector combined risk (0-1 scale).
 
     AirGuard Telemetry Trust Index semantics:
@@ -22,20 +21,19 @@ def derive_trust_score(combined_risk_score: Optional[float]) -> Optional[float]:
 
 
 def compute_weighted_rolling_trust(
-    readings: List[Dict[str, Any]],
-    window: int = 10
-) -> List[Dict[str, Any]]:
+    readings: list[dict[str, Any]], window: int = 10
+) -> list[dict[str, Any]]:
     """Computes a rolling trust score (0-100) across a sequence of historical states.
-    
+
     Derived from a weighted rolling average of combined_risk_score at each historical state
     (higher risk score = lower trust, normalized and smoothed over a configurable window).
-    
+
     Each reading dict is expected to contain:
       - 'timestamp': datetime
       - 'risk_score': float (0.0 to 1.0)
       - 'reported_nic': Optional[int]
       - 'is_alert': bool
-      
+
     Returns a list of dicts with:
       - 'timestamp': datetime
       - 'instantaneous_risk': float
@@ -59,28 +57,32 @@ def compute_weighted_rolling_trust(
         weights = list(range(1, k + 1))
         sum_weights = sum(weights)
 
-        weighted_risk_sum = sum(w * window_slice[j]["risk_score"] for j, w in enumerate(weights))
+        weighted_risk_sum = sum(
+            w * window_slice[j]["risk_score"] for j, w in enumerate(weights)
+        )
         smoothed_risk = weighted_risk_sum / sum_weights if sum_weights > 0 else 0.0
 
         # Normalization: higher risk = lower trust (0 to 100)
         trust_score = round(max(0.0, min(100.0, (1.0 - smoothed_risk) * 100.0)), 1)
         curr = sorted_readings[i]
 
-        history_points.append({
-            "timestamp": curr["timestamp"],
-            "instantaneous_risk": round(float(curr["risk_score"]), 4),
-            "trust_score": trust_score,
-            "is_alert": bool(curr.get("is_alert", False)),
-            "reported_nic": curr.get("reported_nic")
-        })
+        history_points.append(
+            {
+                "timestamp": curr["timestamp"],
+                "instantaneous_risk": round(float(curr["risk_score"]), 4),
+                "trust_score": trust_score,
+                "is_alert": bool(curr.get("is_alert", False)),
+                "reported_nic": curr.get("reported_nic"),
+            }
+        )
 
     return history_points
 
 
-def classify_trust_pattern(history_points: List[Dict[str, Any]]) -> str:
+def classify_trust_pattern(history_points: list[dict[str, Any]]) -> str:
     """Classifies the trust progression shape into 'STABLE', 'GRADUAL_DECLINE', or 'SUDDEN_DROP'.
-    
-    - 'SUDDEN_DROP': An abrupt plunge in trust score within 1-2 consecutive readings 
+
+    - 'SUDDEN_DROP': An abrupt plunge in trust score within 1-2 consecutive readings
       (e.g. >= 15 point drop in a single step, or >= 25 point drop over 2 steps).
     - 'GRADUAL_DECLINE': Sustained multi-step descent where trust drops steadily without sharp cliff drops.
     - 'STABLE': Minor or no degradation.
@@ -92,14 +94,12 @@ def classify_trust_pattern(history_points: List[Dict[str, Any]]) -> str:
     max_single_drop = 0.0
     for i in range(1, len(scores)):
         drop = scores[i - 1] - scores[i]
-        if drop > max_single_drop:
-            max_single_drop = drop
+        max_single_drop = max(max_single_drop, drop)
 
     max_two_step_drop = 0.0
     for i in range(2, len(scores)):
         drop2 = scores[i - 2] - scores[i]
-        if drop2 > max_two_step_drop:
-            max_two_step_drop = drop2
+        max_two_step_drop = max(max_two_step_drop, drop2)
 
     overall_drop = scores[0] - scores[-1]
 
@@ -115,34 +115,44 @@ def classify_trust_pattern(history_points: List[Dict[str, Any]]) -> str:
     return "STABLE"
 
 
-def compute_weighted_rolling_risk(readings: List[Dict[str, Any]], window: int = 10) -> List[Dict[str, Any]]:
+def compute_weighted_rolling_risk(
+    readings: list[dict[str, Any]], window: int = 10
+) -> list[dict[str, Any]]:
     """Smooth observed detector risk without converting it into an aircraft trust rating."""
     if not readings:
         return []
     ordered = sorted(readings, key=lambda item: item["timestamp"])
     output = []
     for idx, current in enumerate(ordered):
-        window_slice = ordered[max(0, idx - window + 1):idx + 1]
+        window_slice = ordered[max(0, idx - window + 1) : idx + 1]
         weights = range(1, len(window_slice) + 1)
-        weighted_sum = sum(weight * item["risk_score"] for weight, item in zip(weights, window_slice))
+        weighted_sum = sum(
+            weight * item["risk_score"] for weight, item in zip(weights, window_slice)
+        )
         weight_total = len(window_slice) * (len(window_slice) + 1) / 2
-        output.append({
-            "timestamp": current["timestamp"],
-            "risk_score": round(float(current["risk_score"]), 4),
-            "smoothed_risk_score": round(weighted_sum / weight_total, 4),
-            "is_alert": bool(current.get("is_alert", False)),
-            "reported_nic": current.get("reported_nic"),
-        })
+        output.append(
+            {
+                "timestamp": current["timestamp"],
+                "risk_score": round(float(current["risk_score"]), 4),
+                "smoothed_risk_score": round(weighted_sum / weight_total, 4),
+                "is_alert": bool(current.get("is_alert", False)),
+                "reported_nic": current.get("reported_nic"),
+            }
+        )
     return output
 
 
-def classify_risk_pattern(history_points: List[Dict[str, Any]]) -> str:
+def classify_risk_pattern(history_points: list[dict[str, Any]]) -> str:
     """Describe changes in smoothed detector risk; this is not a threat classification."""
     if len(history_points) < 2:
         return "UNASSESSED"
     values = [point["smoothed_risk_score"] for point in history_points]
-    max_rise = max((values[i] - values[i - 1] for i in range(1, len(values))), default=0.0)
-    max_two_point_rise = max((values[i] - values[i - 2] for i in range(2, len(values))), default=0.0)
+    max_rise = max(
+        (values[i] - values[i - 1] for i in range(1, len(values))), default=0.0
+    )
+    max_two_point_rise = max(
+        (values[i] - values[i - 2] for i in range(2, len(values))), default=0.0
+    )
     net_rise = values[-1] - values[0]
     if max_rise >= 0.15 or max_two_point_rise >= 0.25:
         return "RISK_SPIKE"

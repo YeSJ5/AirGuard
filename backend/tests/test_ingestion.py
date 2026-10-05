@@ -1,37 +1,38 @@
-import os
-import json
-import pytest
 import asyncio
+import json
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
-import httpx
 
-from app.ingestion.service import OpenSkyIngestionService, CircuitBreakerOpenException
+import httpx
+import pytest
+
+from app.ingestion.service import CircuitBreakerOpenException, OpenSkyIngestionService
 from app.ingestion.sources import OpenSkyStateVectorSource
 
 # Load fixture
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures/opensky_fixture.json")
 
+
 def load_fixture():
     with open(FIXTURE_PATH, "r") as f:
         return json.load(f)
+
 
 @pytest.mark.asyncio
 async def test_normalization():
     # Setup test queue
     queue = asyncio.Queue()
     db_session_maker = MagicMock()
-    
+
     service = OpenSkyIngestionService(queue=queue, db_session_maker=db_session_maker)
-    
+
     # Pre-populate known entities cache
-    service.known_entities = {
-        "d81234": "MILITARY_TARGET_A"
-    }
-    
+    service.known_entities = {"d81234": "MILITARY_TARGET_A"}
+
     fixture_data = load_fixture()
     states = fixture_data["states"]
-    
+
     # 1. Test UAL824 (normal flight)
     val = service.normalize_state(states[0])
     assert val is not None
@@ -44,12 +45,12 @@ async def test_normalization():
     assert val["heading_deg"] == 180.0
     assert val["on_ground"] is False
     assert val["metadata"]["is_known_entity"] is False
-    
+
     # 2. Test DLH452 (null baro altitude, falls back to geo altitude 10050.0)
     val = service.normalize_state(states[1])
     assert val is not None
     assert val["altitude_m"] == 10050.0
-    
+
     # 3. Test MIL-1 (null velocities, heading -> defaults to 0.0, known entity check)
     val = service.normalize_state(states[2])
     assert val is not None
@@ -72,63 +73,83 @@ async def test_normalization():
 async def test_circuit_breaker_and_backoff():
     queue = asyncio.Queue()
     db_session_maker = MagicMock()
-    
+
     # Initialize with max_retries = 3 and short cooldown = 1s for testing
     service = OpenSkyIngestionService(
-        queue=queue, 
+        queue=queue,
         db_session_maker=db_session_maker,
         max_retries=3,
-        cooldown_seconds=1.0
+        cooldown_seconds=1.0,
     )
-    
+
     # Mock the underlying HTTP request used by the OpenSky source adapter.
     mock_request = AsyncMock()
     service.client.request = mock_request
-    
+
     # Step 1: Simulate 1st failure (consecutive_failures=1, backoff 2^1 = 2s)
     mock_request.side_effect = httpx.ConnectError("Connection timed out")
     assert await service.poll_api() is None
-        
+
     assert service.consecutive_failures == 1
     assert service.breaker_state == "CLOSED"
     assert service.backoff_seconds == 2.0
 
     # Step 2: Simulate 2nd failure (backoff 2^2 = 4s)
     assert await service.poll_api() is None
-        
+
     assert service.consecutive_failures == 2
     assert service.breaker_state == "CLOSED"
     assert service.backoff_seconds == 4.0
 
     # Step 3: Simulate 3rd failure (consecutive_failures=3 reaches max_retries=3 -> TRIPS BREAKER TO OPEN)
     assert await service.poll_api() is None
-        
+
     assert service.consecutive_failures == 3
     assert service.breaker_state == "OPEN"
-    assert service.backoff_seconds == 0.0 # Resets backoff during OPEN
-    
+    assert service.backoff_seconds == 0.0  # Resets backoff during OPEN
+
     # Step 4: Next poll immediately should raise CircuitBreakerOpenException (cooldown active)
     with pytest.raises(CircuitBreakerOpenException):
         await service.poll_api()
-        
+
     # Step 5: Wait 1.1s for cooldown to expire
     await asyncio.sleep(1.1)
-    
+
     # Next poll should change state to HALF_OPEN and run the query.
     # Set the return value to a successful mock response
     mock_res = MagicMock()
     mock_res.status_code = 200
     mock_res.headers = {"x-rate-limit-remaining": "100"}
-    mock_res.json.return_value = {"states": [
-        ["a1b2c3", "UAL824", "USA", 1722784490, 1722784495, -122.4194, 37.7749, 10000.0, False, 250.0, 180.0, 0.0, None, 10100.0, "1200", False, 0]
-    ]}
+    mock_res.json.return_value = {
+        "states": [
+            [
+                "a1b2c3",
+                "UAL824",
+                "USA",
+                1722784490,
+                1722784495,
+                -122.4194,
+                37.7749,
+                10000.0,
+                False,
+                250.0,
+                180.0,
+                0.0,
+                None,
+                10100.0,
+                "1200",
+                False,
+                0,
+            ]
+        ]
+    }
     mock_request.side_effect = None
     mock_request.return_value = mock_res
-    
+
     states = await service.poll_api()
     assert len(states) == 1
     assert states[0]["icao24"] == "a1b2c3"
-    
+
     # Breaker should recover to CLOSED and consecutive_failures resets
     assert service.breaker_state == "CLOSED"
     assert service.consecutive_failures == 0
@@ -145,7 +166,9 @@ def test_opensky_snapshot_shape_distinguishes_empty_from_invalid():
 
 @pytest.mark.asyncio
 async def test_valid_empty_poll_replaces_snapshot(monkeypatch):
-    service = OpenSkyIngestionService(queue=asyncio.Queue(), db_session_maker=MagicMock())
+    service = OpenSkyIngestionService(
+        queue=asyncio.Queue(), db_session_maker=MagicMock()
+    )
     response = MagicMock(status_code=200, headers={"x-rate-limit-remaining": "42"})
     source = MagicMock(name="test_feed")
     source.name = "test_feed"
@@ -154,8 +177,9 @@ async def test_valid_empty_poll_replaces_snapshot(monkeypatch):
     service.last_valid_snapshot = [{"icao24": "abc123"}]
     service._broadcast_refresh_state = AsyncMock()
 
-    from app.core.redis import redis_client
     from app.api.v1 import endpoints
+    from app.core.redis import redis_client
+
     monkeypatch.setattr(redis_client, "ping", AsyncMock(return_value=True))
     monkeypatch.setattr(endpoints, "invalidate_snapshot_cache", AsyncMock())
 
@@ -168,7 +192,9 @@ async def test_valid_empty_poll_replaces_snapshot(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_failed_poll_retains_last_valid_snapshot():
-    service = OpenSkyIngestionService(queue=asyncio.Queue(), db_session_maker=MagicMock())
+    service = OpenSkyIngestionService(
+        queue=asyncio.Queue(), db_session_maker=MagicMock()
+    )
     source = MagicMock(name="test_feed")
     source.name = "test_feed"
     source.fetch = AsyncMock(side_effect=httpx.ConnectError("temporary outage"))
@@ -187,8 +213,12 @@ async def test_failed_poll_retains_last_valid_snapshot():
 
 @pytest.mark.asyncio
 async def test_rate_limit_retry_after_controls_next_attempt_and_preserves_snapshot():
-    service = OpenSkyIngestionService(queue=asyncio.Queue(), db_session_maker=MagicMock())
-    response = MagicMock(status_code=429, headers={"retry-after": "120"}, text="rate limited")
+    service = OpenSkyIngestionService(
+        queue=asyncio.Queue(), db_session_maker=MagicMock()
+    )
+    response = MagicMock(
+        status_code=429, headers={"retry-after": "120"}, text="rate limited"
+    )
     source = MagicMock(name="test_feed")
     source.name = "test_feed"
     source.fetch = AsyncMock(return_value=(response, []))
@@ -208,7 +238,9 @@ async def test_rate_limit_retry_after_controls_next_attempt_and_preserves_snapsh
 
 @pytest.mark.asyncio
 async def test_manual_refresh_is_queued_without_bypassing_retry_deadline():
-    service = OpenSkyIngestionService(queue=asyncio.Queue(), db_session_maker=MagicMock())
+    service = OpenSkyIngestionService(
+        queue=asyncio.Queue(), db_session_maker=MagicMock()
+    )
     service.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=15)
     service._broadcast_refresh_state = AsyncMock()
 

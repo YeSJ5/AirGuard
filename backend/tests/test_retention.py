@@ -1,8 +1,11 @@
-import pytest
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import select, func
+
+import pytest
+from sqlalchemy import func, select
+
 from app.models import AircraftState, Alert
 from app.tasks.retention import run_retention
+
 
 @pytest.mark.asyncio
 async def test_retention_downsampling(isolated_postgres_schema):
@@ -26,7 +29,7 @@ async def test_retention_downsampling(isolated_postgres_schema):
                 vertical_rate_ms=0.0,
                 on_ground=False,
                 received_at=old_time + timedelta(minutes=i),
-                source="opensky"
+                source="opensky",
             )
             session.add(state)
 
@@ -42,11 +45,11 @@ async def test_retention_downsampling(isolated_postgres_schema):
             vertical_rate_ms=0.0,
             on_ground=False,
             received_at=old_time,
-            source="opensky"
+            source="opensky",
         )
         session.add(linked_state)
         await session.flush()  # populated linked_state.id
-        
+
         alert = Alert(
             icao24="LNK222",
             aircraft_state_id=linked_state.id,
@@ -58,7 +61,7 @@ async def test_retention_downsampling(isolated_postgres_schema):
             shap_explanation={"shap": {}, "evidence": {}},
             detected_at=now,
             is_synthetic=False,
-            acknowledged=False
+            acknowledged=False,
         )
         session.add(alert)
 
@@ -75,53 +78,71 @@ async def test_retention_downsampling(isolated_postgres_schema):
                 vertical_rate_ms=0.0,
                 on_ground=False,
                 received_at=new_time + timedelta(minutes=i),
-                source="opensky"
+                source="opensky",
             )
             session.add(state)
 
         await session.commit()
 
     # 5. Execute in DRY RUN mode (verify no deletions happen)
-    dry_deleted_count = await run_retention(days=30, dry_run=True, connection=connection)
-    
+    dry_deleted_count = await run_retention(
+        days=30, dry_run=True, connection=connection
+    )
+
     # 20 old unlinked records, keeping 1-in-10 (keep sequence 1 and 11), so 18 should be candidates for deletion
-    assert dry_deleted_count == 18, f"Expected 18 candidates for deletion, found {dry_deleted_count}"
+    assert (
+        dry_deleted_count == 18
+    ), f"Expected 18 candidates for deletion, found {dry_deleted_count}"
 
     async with sessions() as session:
         count_res = await session.execute(
-            select(func.count(AircraftState.id)).where(AircraftState.icao24.in_(["OLD111", "LNK222", "NEW333"]))
+            select(func.count(AircraftState.id)).where(
+                AircraftState.icao24.in_(["OLD111", "LNK222", "NEW333"])
+            )
         )
         total_count_before = count_res.scalar()
         assert total_count_before == 26, "Dry-run should not delete any records."
 
     # 6. Execute in ACTIVE mode
-    actual_deleted_count = await run_retention(days=30, dry_run=False, connection=connection)
+    actual_deleted_count = await run_retention(
+        days=30, dry_run=False, connection=connection
+    )
     assert actual_deleted_count == 18
 
     # 7. Assert database records count and integrity
     async with sessions() as session:
         # Check total remaining test states
         count_res = await session.execute(
-            select(func.count(AircraftState.id)).where(AircraftState.icao24.in_(["OLD111", "LNK222", "NEW333"]))
+            select(func.count(AircraftState.id)).where(
+                AircraftState.icao24.in_(["OLD111", "LNK222", "NEW333"])
+            )
         )
         total_count_after = count_res.scalar()
-        
+
         # Original 26 - 18 deleted = 8 remaining
-        assert total_count_after == 8, f"Expected 8 remaining states, found {total_count_after}"
+        assert (
+            total_count_after == 8
+        ), f"Expected 8 remaining states, found {total_count_after}"
 
         # Verify new states are fully intact
-        new_res = await session.execute(select(AircraftState).where(AircraftState.icao24 == "NEW333"))
+        new_res = await session.execute(
+            select(AircraftState).where(AircraftState.icao24 == "NEW333")
+        )
         assert len(new_res.scalars().all()) == 5
 
         # Verify linked state is fully intact
-        linked_res = await session.execute(select(AircraftState).where(AircraftState.icao24 == "LNK222"))
+        linked_res = await session.execute(
+            select(AircraftState).where(AircraftState.icao24 == "LNK222")
+        )
         assert len(linked_res.scalars().all()) == 1
 
         # Verify OLD states are downsampled to exactly 2 records (1-in-10 of 20 is 2)
-        old_res = await session.execute(select(AircraftState).where(AircraftState.icao24 == "OLD111"))
+        old_res = await session.execute(
+            select(AircraftState).where(AircraftState.icao24 == "OLD111")
+        )
         remaining_old_states = old_res.scalars().all()
         assert len(remaining_old_states) == 2
-        
+
         # Verify the kept states are the 1st and 11th sequences (received_at)
         callsigns = {s.callsign for s in remaining_old_states}
         assert "OLD00" in callsigns

@@ -3,9 +3,11 @@
 Adapters own provider-specific transport and wire-format handling. The
 ingestion service can consume any adapter that returns canonical observations.
 """
+
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, Protocol
 
 import httpx
 
@@ -15,7 +17,9 @@ from app.ingestion.opensky_auth import opensky_auth
 class SurveillanceSource(Protocol):
     name: str
 
-    async def fetch(self, client: httpx.AsyncClient, url: str, params: dict[str, Any]) -> tuple[httpx.Response, list[dict[str, Any]]]:
+    async def fetch(
+        self, client: httpx.AsyncClient, url: str, params: dict[str, Any]
+    ) -> tuple[httpx.Response, list[dict[str, Any]]]:
         """Return the raw response for telemetry and canonical observations."""
 
 
@@ -24,10 +28,24 @@ class OpenSkyStateVectorSource:
 
     name = "opensky"
     FIELDS = (
-        "icao24", "callsign", "origin_country", "time_position", "last_contact",
-        "longitude", "latitude", "baro_altitude", "on_ground", "velocity",
-        "true_track", "vertical_rate", "sensors", "geo_altitude", "squawk",
-        "spi", "position_source", "category",
+        "icao24",
+        "callsign",
+        "origin_country",
+        "time_position",
+        "last_contact",
+        "longitude",
+        "latitude",
+        "baro_altitude",
+        "on_ground",
+        "velocity",
+        "true_track",
+        "vertical_rate",
+        "sensors",
+        "geo_altitude",
+        "squawk",
+        "spi",
+        "position_source",
+        "category",
     )
 
     @classmethod
@@ -45,10 +63,17 @@ class OpenSkyStateVectorSource:
         for vector in vectors:
             if not isinstance(vector, Sequence) or isinstance(vector, (str, bytes)):
                 continue
-            result.append({field: vector[i] if i < len(vector) else None for i, field in enumerate(cls.FIELDS)})
+            result.append(
+                {
+                    field: vector[i] if i < len(vector) else None
+                    for i, field in enumerate(cls.FIELDS)
+                }
+            )
         return result
 
-    async def fetch(self, client: httpx.AsyncClient, url: str, params: dict[str, Any]) -> tuple[httpx.Response, list[dict[str, Any]]]:
+    async def fetch(
+        self, client: httpx.AsyncClient, url: str, params: dict[str, Any]
+    ) -> tuple[httpx.Response, list[dict[str, Any]]]:
         response = await opensky_auth.request(client, "GET", url, params=params)
         records = self.decode(response.json()) if response.status_code == 200 else []
         return response, records

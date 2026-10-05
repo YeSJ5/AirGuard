@@ -789,13 +789,15 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
         lastCenterRef.current = [c.lat, c.lng];
         lastZoomRef.current = map.getZoom();
         map.remove();
-      } catch (err) {}
+      } catch (_err) {
+        // Map instance already unmounted or disposed
+      }
       mapRef.current = null;
       currentTileLayerRef.current = null;
       routeLayerRef.current = null;
       nearbyLayerRef.current = null;
     };
-  }, [isExpanded, renderCanvas]);
+  }, [isExpanded, renderCanvas, activeMapLayer]);
 
   // Smooth follow selected flight
   useEffect(() => {

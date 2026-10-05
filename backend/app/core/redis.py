@@ -1,4 +1,5 @@
 import redis.asyncio as aioredis
+
 from app.core.config import settings
 
 redis_client = aioredis.from_url(
@@ -8,5 +9,5 @@ redis_client = aioredis.from_url(
     socket_connect_timeout=5.0,
     # RESP2 keeps Redis Pub/Sub push payloads out of redis-py's INFO logging
     # path while retaining the Streams and Pub/Sub commands used by AirGuard.
-    protocol=2
+    protocol=2,
 )

@@ -1,9 +1,11 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
+
+from app.core.database import get_db
 from app.main import app
 
-from unittest.mock import AsyncMock, patch
-from app.core.database import get_db
 
 @pytest.mark.asyncio
 async def test_health_check():

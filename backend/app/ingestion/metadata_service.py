@@ -1,24 +1,29 @@
 import asyncio
 import logging
 import time
-from typing import Optional, Dict, Any
+from typing import Any
+
 import httpx
 
 from app.ingestion.opensky_auth import opensky_auth
 
 logger = logging.getLogger("airguard.metadata")
 
+
 class AircraftMetadataService:
     """
     Maintains aggressive in-memory and Redis-backed caching of aircraft airframe metadata,
     querying OpenSky metadata endpoints with graceful fallback to international civil registries.
     """
+
     def __init__(self):
-        self._memory_cache: Dict[str, Dict[str, Any]] = {}
-        self._unavailable_until: Dict[str, float] = {}
+        self._memory_cache: dict[str, dict[str, Any]] = {}
+        self._unavailable_until: dict[str, float] = {}
         self.http_client = httpx.AsyncClient(timeout=3.0)
 
-    async def get_aircraft_metadata(self, icao24: str, callsign: Optional[str] = None) -> Dict[str, Any]:
+    async def get_aircraft_metadata(
+        self, icao24: str, callsign: str | None = None
+    ) -> dict[str, Any]:
         clean_icao = icao24.lower().strip()
 
         # 1. Fast in-memory cache
@@ -32,9 +37,11 @@ class AircraftMetadataService:
         # 2. Redis cache check
         try:
             from app.core.redis import redis_client
+
             cached_json = await redis_client.get(f"cache:metadata:v2:{clean_icao}")
             if cached_json:
                 import json
+
                 parsed = json.loads(cached_json)
                 self._memory_cache[clean_icao] = parsed
                 return parsed
@@ -54,17 +61,17 @@ class AircraftMetadataService:
         return self._unavailable_result()
 
     @staticmethod
-    def _unavailable_result() -> Dict[str, Any]:
+    def _unavailable_result() -> dict[str, Any]:
         return {
             "registration": None,
             "typecode": None,
             "model": None,
             "operator": None,
             "country": None,
-            "source": "unavailable"
+            "source": "unavailable",
         }
 
-    async def _query_opensky_metadata(self, icao24: str) -> Optional[Dict[str, Any]]:
+    async def _query_opensky_metadata(self, icao24: str) -> dict[str, Any] | None:
         url = f"https://opensky-network.org/api/metadata/aircraft/icao/{icao24}"
         try:
             res = await opensky_auth.request(self.http_client, "GET", url)
@@ -73,26 +80,32 @@ class AircraftMetadataService:
                 if isinstance(data, dict):
                     return {
                         "registration": data.get("registration"),
-                        "typecode": data.get("typecode") or data.get("icaoAircraftClass"),
+                        "typecode": data.get("typecode")
+                        or data.get("icaoAircraftClass"),
                         "model": data.get("model") or data.get("typecode"),
                         "operator": data.get("operator") or data.get("owner"),
                         "country": data.get("country"),
-                        "source": "opensky_metadata"
+                        "source": "opensky_metadata",
                     }
         except Exception as e:
             logger.debug(f"OpenSky metadata query gracefully skipped for {icao24}: {e}")
         return None
 
-    def _cache_result(self, icao: str, data: Dict[str, Any]):
+    def _cache_result(self, icao: str, data: dict[str, Any]):
         self._memory_cache[icao] = data
         try:
-            from app.core.redis import redis_client
             import json
+
+            from app.core.redis import redis_client
+
             async def _safe_set_redis():
                 try:
-                    await redis_client.set(f"cache:metadata:v2:{icao}", json.dumps(data), ex=86400)
+                    await redis_client.set(
+                        f"cache:metadata:v2:{icao}", json.dumps(data), ex=86400
+                    )
                 except Exception:
                     pass
+
             asyncio.create_task(_safe_set_redis())
         except Exception:
             pass

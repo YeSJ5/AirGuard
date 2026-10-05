@@ -1,13 +1,16 @@
-import pytest
 from datetime import datetime, timezone
-from app.models import AircraftState, Alert, ModelRun, KnownEntity
+
+import pytest
+
+from app.models import AircraftState, Alert, KnownEntity, ModelRun
 
 # --- Static Model Tests (Always Run, No DB required) ---
+
 
 def test_static_aircraft_state_schema():
     """Verify AircraftState schema columns statically via SQLAlchemy metadata."""
     table = AircraftState.__table__
-    
+
     assert table.c.id.type.__class__.__name__ == "BigInteger"
     assert table.c.icao24.type.length == 6
     assert table.c.callsign.type.length == 10
@@ -22,9 +25,14 @@ def test_static_aircraft_state_schema():
     assert table.c.source.server_default.arg == "opensky"
 
     # Check composite index
-    composite_index = next((idx for idx in table.indexes if idx.name == "idx_states_icao_received_desc"), None)
-    assert composite_index is not None, "Composite index idx_states_icao_received_desc not defined"
-    
+    composite_index = next(
+        (idx for idx in table.indexes if idx.name == "idx_states_icao_received_desc"),
+        None,
+    )
+    assert (
+        composite_index is not None
+    ), "Composite index idx_states_icao_received_desc not defined"
+
     # Verify index columns
     col_names = [c.name for c in composite_index.columns]
     assert "icao24" in col_names
@@ -34,7 +42,7 @@ def test_static_aircraft_state_schema():
 def test_static_alert_schema():
     """Verify Alert schema columns statically via SQLAlchemy metadata."""
     table = Alert.__table__
-    
+
     assert table.c.id.type.__class__.__name__ == "BigInteger"
     assert table.c.icao24.type.length == 6
     assert table.c.aircraft_state_id.type.__class__.__name__ == "BigInteger"
@@ -59,7 +67,7 @@ def test_static_alert_schema():
 def test_static_model_run_schema():
     """Verify ModelRun schema columns statically."""
     table = ModelRun.__table__
-    
+
     assert table.c.id.type.__class__.__name__ == "Integer"
     assert table.c.run_at.type.timezone is True
     assert table.c.model_version.type.length == 20
@@ -76,7 +84,7 @@ def test_static_model_run_schema():
 def test_static_known_entity_schema():
     """Verify KnownEntity schema columns statically."""
     table = KnownEntity.__table__
-    
+
     assert table.c.id.type.__class__.__name__ == "Integer"
     assert table.c.icao24.type.length == 6
     assert table.c.icao24.unique is True
@@ -102,12 +110,12 @@ async def test_live_db_crud_operations(isolated_postgres_schema):
             heading_deg=180.0,
             vertical_rate_ms=0.0,
             on_ground=False,
-            received_at=datetime.now(timezone.utc)
+            received_at=datetime.now(timezone.utc),
         )
         session.add(state)
         await session.commit()
         await session.refresh(state)
-        
+
         assert state.id is not None
 
         # 2. Insert Alert associated with the state
@@ -120,12 +128,12 @@ async def test_live_db_crud_operations(isolated_postgres_schema):
             combined_risk_score=0.89,
             reason_text="Anomalous flight velocity detected",
             shap_explanation={"velocity_ms": 3.4, "altitude_m": -1.2},
-            detected_at=datetime.now(timezone.utc)
+            detected_at=datetime.now(timezone.utc),
         )
         session.add(alert)
         await session.commit()
         await session.refresh(alert)
-        
+
         assert alert.id is not None
         assert alert.aircraft_state.callsign == "TEST101"
 

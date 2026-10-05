@@ -1,26 +1,30 @@
-import pytest
-from httpx import AsyncClient, ASGITransport
-from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, AsyncMock
 from datetime import datetime, timezone
-import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.main import app
-from app.api.v1.endpoints import manager, SYSTEM_STATS
-from app.models import AircraftState, Alert, ModelRun
+import pytest
+from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
+
+from app.api.deps import (
+    get_current_user,
+    require_admin,
+    require_analyst,
+    require_viewer,
+)
+from app.api.v1.endpoints import SYSTEM_STATS, manager
 
 # Override the get_db and auth dependencies
 from app.core.database import get_db
-from app.api.deps import get_current_user, require_viewer, require_analyst, require_admin
-from app.models import User
+from app.main import app
+from app.models import AircraftState, Alert, ModelRun, User
 
-from unittest.mock import MagicMock, AsyncMock, patch
 
 @pytest.fixture
 def mock_db():
     session = AsyncMock()
     session.add = MagicMock()
     return session
+
 
 @pytest.fixture(autouse=True)
 def override_db_dependency(mock_db):
@@ -30,11 +34,17 @@ def override_db_dependency(mock_db):
     app.dependency_overrides[require_viewer] = lambda: mock_user
     app.dependency_overrides[require_analyst] = lambda: mock_user
     app.dependency_overrides[require_admin] = lambda: mock_user
-    with patch("app.api.v1.endpoints.redis_client.get", new=AsyncMock(return_value=None)), patch(
-        "app.api.v1.endpoints.redis_client.ping", new=AsyncMock(return_value=True)
+    with (
+        patch(
+            "app.api.v1.endpoints.redis_client.get", new=AsyncMock(return_value=None)
+        ),
+        patch(
+            "app.api.v1.endpoints.redis_client.ping", new=AsyncMock(return_value=True)
+        ),
     ):
         yield
     app.dependency_overrides.clear()
+
 
 @pytest.mark.asyncio
 async def test_get_aircraft(mock_db):
@@ -50,7 +60,7 @@ async def test_get_aircraft(mock_db):
         vertical_rate_ms=0.0,
         on_ground=False,
         received_at=datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc),
-        source="opensky"
+        source="opensky",
     )
 
     mock_res = MagicMock()
@@ -67,6 +77,7 @@ async def test_get_aircraft(mock_db):
     assert data[0]["icao24"] == "a1b2c3"
     assert data[0]["callsign"] == "UAL824"
     assert data[0]["assessment_status"] == "INSUFFICIENT_EVIDENCE"
+
 
 @pytest.mark.asyncio
 async def test_get_aircraft_history(mock_db):
@@ -99,6 +110,7 @@ async def test_get_aircraft_history(mock_db):
     assert len(data) == 1
     assert data[0]["icao24"] == "a1b2c3"
 
+
 @pytest.mark.asyncio
 async def test_get_aircraft_detail(mock_db):
     mock_state = AircraftState(
@@ -113,7 +125,7 @@ async def test_get_aircraft_detail(mock_db):
         vertical_rate_ms=0.0,
         on_ground=False,
         received_at=datetime.now(timezone.utc),
-        source="opensky"
+        source="opensky",
     )
 
     state_result = MagicMock()
@@ -124,19 +136,37 @@ async def test_get_aircraft_detail(mock_db):
     assessment_result.scalar_one_or_none.return_value = None
     first_seen_result = MagicMock()
     first_seen_result.scalar_one_or_none.return_value = mock_state.received_at
-    mock_db.execute.side_effect = [state_result, alert_result, assessment_result, first_seen_result]
+    mock_db.execute.side_effect = [
+        state_result,
+        alert_result,
+        assessment_result,
+        first_seen_result,
+    ]
 
     route_service = MagicMock()
-    route_service.get_or_fetch_route = AsyncMock(return_value={
-        "icao24": "a1b2c3", "session_id": "test-session", "callsign": "UAL824",
-        "est_departure_airport": None, "est_arrival_airport": None,
-        "first_seen": None, "last_seen": None, "route_text": "Route unknown",
-        "fetched_at": datetime.now(timezone.utc), "dep_lat": None, "dep_lng": None,
-        "arr_lat": None, "arr_lng": None,
-    })
-    with patch("app.api.v1.endpoints.active_route_service", new=route_service), patch(
-        "app.ingestion.metadata_service.active_metadata_service.get_aircraft_metadata",
-        new=AsyncMock(return_value={"source": "unknown"}),
+    route_service.get_or_fetch_route = AsyncMock(
+        return_value={
+            "icao24": "a1b2c3",
+            "session_id": "test-session",
+            "callsign": "UAL824",
+            "est_departure_airport": None,
+            "est_arrival_airport": None,
+            "first_seen": None,
+            "last_seen": None,
+            "route_text": "Route unknown",
+            "fetched_at": datetime.now(timezone.utc),
+            "dep_lat": None,
+            "dep_lng": None,
+            "arr_lat": None,
+            "arr_lng": None,
+        }
+    )
+    with (
+        patch("app.api.v1.endpoints.active_route_service", new=route_service),
+        patch(
+            "app.ingestion.metadata_service.active_metadata_service.get_aircraft_metadata",
+            new=AsyncMock(return_value={"source": "unknown"}),
+        ),
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -152,6 +182,7 @@ async def test_get_aircraft_detail(mock_db):
     assert "staleness" in data
     assert data["staleness"]["status"] in ["LIVE", "STALE", "LOST"]
 
+
 @pytest.mark.asyncio
 async def test_get_alerts(mock_db):
     mock_alert = Alert(
@@ -166,7 +197,7 @@ async def test_get_alerts(mock_db):
         shap_explanation={"top_features": []},
         detected_at=datetime.now(timezone.utc),
         is_synthetic=False,
-        acknowledged=False
+        acknowledged=False,
     )
 
     mock_res = MagicMock()
@@ -184,6 +215,7 @@ async def test_get_alerts(mock_db):
     assert data[0]["combined_risk_score"] == 0.85
     assert res.headers["X-Active-Alert-Count"] == "17"
 
+
 @pytest.mark.asyncio
 async def test_acknowledge_alert(mock_db):
     mock_alert = Alert(
@@ -198,7 +230,7 @@ async def test_acknowledge_alert(mock_db):
         shap_explanation={"top_features": []},
         detected_at=datetime.now(timezone.utc),
         is_synthetic=False,
-        acknowledged=False
+        acknowledged=False,
     )
 
     mock_res = MagicMock()
@@ -219,6 +251,7 @@ async def test_acknowledge_alert(mock_db):
         res = await ac.post("/api/v1/alerts/999/acknowledge")
     assert res.status_code == 404
 
+
 @pytest.mark.asyncio
 async def test_get_model_runs(mock_db):
     mock_run = ModelRun(
@@ -232,7 +265,7 @@ async def test_get_model_runs(mock_db):
         precision=0.9,
         recall=0.8,
         f1=0.85,
-        notes="Ensemble test run"
+        notes="Ensemble test run",
     )
 
     mock_res = MagicMock()
@@ -247,6 +280,7 @@ async def test_get_model_runs(mock_db):
     data = res.json()
     assert len(data) == 1
     assert data[0]["model_version"] == "v0.1.0"
+
 
 @pytest.mark.asyncio
 async def test_system_health():
@@ -274,15 +308,22 @@ async def test_system_health():
     assert data["database_status"] == "CONNECTED"
     assert data["redis_status"] == "CONNECTED"
 
+
 def test_websocket_broadcast():
     client = TestClient(app)
     test_user = User(id=1, email="test@airguard.sec", role="admin")
-    with patch("app.api.v1.endpoints.get_websocket_user", AsyncMock(return_value=test_user)):
-        with client.websocket_connect("/api/v1/stream?token=unit-test-token") as websocket:
+    with patch(
+        "app.api.v1.endpoints.get_websocket_user", AsyncMock(return_value=test_user)
+    ):
+        with client.websocket_connect(
+            "/api/v1/stream?token=unit-test-token"
+        ) as websocket:
             import asyncio
 
             async def do_broadcast():
-                await manager.broadcast({"event": "ALERT_TRIGGERED", "icao24": "test11"})
+                await manager.broadcast(
+                    {"event": "ALERT_TRIGGERED", "icao24": "test11"}
+                )
 
             asyncio.run(do_broadcast())
             msg = websocket.receive_json()
@@ -297,43 +338,53 @@ async def test_generate_session_report(mock_db):
         # Distinct icao24 query
         MagicMock(scalars=lambda: MagicMock(all=lambda: ["a1b2c3"])),
         # All alerts query
-        MagicMock(scalars=lambda: MagicMock(all=lambda: [
-            Alert(
-                id=1,
-                icao24="a1b2c3",
-                aircraft_state_id=1,
-                rule_flags=["rule_position_jump"],
-                ensemble_score=0.8,
-                autoencoder_score=0.7,
-                combined_risk_score=0.85,
-                reason_text="Implied speed anomaly",
-                shap_explanation={"shap": {"speed": 0.5}},
-                detected_at=datetime.now(timezone.utc)
+        MagicMock(
+            scalars=lambda: MagicMock(
+                all=lambda: [
+                    Alert(
+                        id=1,
+                        icao24="a1b2c3",
+                        aircraft_state_id=1,
+                        rule_flags=["rule_position_jump"],
+                        ensemble_score=0.8,
+                        autoencoder_score=0.7,
+                        combined_risk_score=0.85,
+                        reason_text="Implied speed anomaly",
+                        shap_explanation={"shap": {"speed": 0.5}},
+                        detected_at=datetime.now(timezone.utc),
+                    )
+                ]
             )
-        ])),
+        ),
         # Model run query
-        MagicMock(scalar_one_or_none=lambda: ModelRun(
-            model_version="v0.1.0",
-            precision=0.9,
-            recall=0.8,
-            f1=0.85,
-            notes="Mini set"
-        )),
-        # Top alerts query
-        MagicMock(scalars=lambda: MagicMock(all=lambda: [
-            Alert(
-                id=1,
-                icao24="a1b2c3",
-                aircraft_state_id=1,
-                rule_flags=["rule_position_jump"],
-                ensemble_score=0.8,
-                autoencoder_score=0.7,
-                combined_risk_score=0.85,
-                reason_text="Implied speed anomaly",
-                shap_explanation={"shap": {"speed": 0.5}},
-                detected_at=datetime.now(timezone.utc)
+        MagicMock(
+            scalar_one_or_none=lambda: ModelRun(
+                model_version="v0.1.0",
+                precision=0.9,
+                recall=0.8,
+                f1=0.85,
+                notes="Mini set",
             )
-        ]))
+        ),
+        # Top alerts query
+        MagicMock(
+            scalars=lambda: MagicMock(
+                all=lambda: [
+                    Alert(
+                        id=1,
+                        icao24="a1b2c3",
+                        aircraft_state_id=1,
+                        rule_flags=["rule_position_jump"],
+                        ensemble_score=0.8,
+                        autoencoder_score=0.7,
+                        combined_risk_score=0.85,
+                        reason_text="Implied speed anomaly",
+                        shap_explanation={"shap": {"speed": 0.5}},
+                        detected_at=datetime.now(timezone.utc),
+                    )
+                ]
+            )
+        ),
     ]
 
     transport = ASGITransport(app=app)
@@ -372,7 +423,9 @@ async def test_get_all_aircraft_history(mock_db):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        res = await ac.get("/api/v1/aircraft/history?start=2026-08-04T00:00:00Z&end=2026-08-04T23:59:59Z")
+        res = await ac.get(
+            "/api/v1/aircraft/history?start=2026-08-04T00:00:00Z&end=2026-08-04T23:59:59Z"
+        )
 
     assert res.status_code == 200
     data = res.json()
@@ -410,7 +463,9 @@ async def test_get_all_aircraft_history_naive_and_paginated(mock_db):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         # Test with naive timestamp (no Z) and limit=1
-        res = await ac.get("/api/v1/aircraft/history?start=2026-08-04T00:00:00&end=2026-08-04T23:59:59&limit=1&icao24=a1b2c3")
+        res = await ac.get(
+            "/api/v1/aircraft/history?start=2026-08-04T00:00:00&end=2026-08-04T23:59:59&limit=1&icao24=a1b2c3"
+        )
 
     assert res.status_code == 200
     data = res.json()
@@ -439,7 +494,7 @@ async def test_update_config():
         "max_vertical_rate_ms": 55.0,
         "max_ground_altitude_m": 120.0,
         "max_ground_speed_ms": 80.0,
-        "min_flight_speed_ms": 25.0
+        "min_flight_speed_ms": 25.0,
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -458,4 +513,3 @@ async def test_replay_session_validation_requires_independently_labeled_data(moc
 
     assert res.status_code == 409
     assert "independently labeled validation dataset" in res.json()["detail"]
-

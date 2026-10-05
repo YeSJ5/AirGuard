@@ -44,6 +44,19 @@ black = "^24.4.2"
 locust = "^2.46.3"
 schemathesis = "^4.24.3"
 
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501", "B008", "E402", "E712", "F841"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+

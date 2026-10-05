@@ -1,15 +1,11 @@
-import pytest
 from datetime import datetime, timedelta, timezone
 
-from app.detection.trust import (
-    compute_weighted_rolling_trust,
-    classify_trust_pattern
-)
+from app.detection.trust import classify_trust_pattern, compute_weighted_rolling_trust
 
 
 def test_trust_history_shapes_gradual_decline_vs_sudden_drop():
     """Asserts that the computed trust-history correctly reflects both gradual decline and sudden drop shapes.
-    
+
     Gradual decline: Smooth, steady decay across multiple readings with small step differences (e.g. GPS jamming).
     Sudden drop: Flat high trust followed by a steep cliff drop within 1-2 readings (e.g. spoofed ghost injection).
     """
@@ -19,15 +15,28 @@ def test_trust_history_shapes_gradual_decline_vs_sudden_drop():
     # 1. Construct Gradual Decline Sequence (15 steps)
     # Risk slowly creeps up: 0.0, 0.05, 0.10, 0.16, 0.22, 0.30, 0.40, 0.50, 0.60, 0.70, 0.78, 0.84, 0.90, 0.92, 0.95
     gradual_risks = [
-        0.00, 0.05, 0.10, 0.16, 0.22, 0.30, 0.40, 0.50,
-        0.60, 0.70, 0.78, 0.84, 0.90, 0.92, 0.95
+        0.00,
+        0.05,
+        0.10,
+        0.16,
+        0.22,
+        0.30,
+        0.40,
+        0.50,
+        0.60,
+        0.70,
+        0.78,
+        0.84,
+        0.90,
+        0.92,
+        0.95,
     ]
     gradual_readings = [
         {
             "timestamp": base_time + (i * interval),
             "risk_score": r,
             "reported_nic": 9 if r < 0.5 else 4,
-            "is_alert": r >= 0.7
+            "is_alert": r >= 0.7,
         }
         for i, r in enumerate(gradual_risks)
     ]
@@ -46,15 +55,18 @@ def test_trust_history_shapes_gradual_decline_vs_sudden_drop():
         for i in range(1, len(gradual_history))
     ]
     max_gradual_step = max(gradual_step_drops)
-    assert max_gradual_step < 15.0, f"Expected smooth steps, but max step drop was {max_gradual_step}"
+    assert (
+        max_gradual_step < 15.0
+    ), f"Expected smooth steps, but max step drop was {max_gradual_step}"
 
     # (c) Intermediate scores are spread across the spectrum (showing continuous gradient)
     mid_score = gradual_history[7]["trust_score"]
-    assert 55.0 <= mid_score <= 85.0, f"Expected mid-way transition score, got {mid_score}"
+    assert (
+        55.0 <= mid_score <= 85.0
+    ), f"Expected mid-way transition score, got {mid_score}"
 
     # (d) Classified pattern
     assert classify_trust_pattern(gradual_history) == "GRADUAL_DECLINE"
-
 
     # 2. Construct Sudden Drop Sequence (15 steps)
     # 10 baseline clean readings followed by an abrupt spoofed injection (risk = 0.95)
@@ -64,7 +76,7 @@ def test_trust_history_shapes_gradual_decline_vs_sudden_drop():
             "timestamp": base_time + (i * interval),
             "risk_score": r,
             "reported_nic": 9 if r == 0.0 else 2,
-            "is_alert": r > 0.0
+            "is_alert": r > 0.0,
         }
         for i, r in enumerate(sudden_risks)
     ]
@@ -83,11 +95,12 @@ def test_trust_history_shapes_gradual_decline_vs_sudden_drop():
 
     # (c) Within 2 readings of the attack, trust plummets by > 30 points
     two_step_drop = sudden_history[9]["trust_score"] - sudden_history[11]["trust_score"]
-    assert two_step_drop >= 30.0, f"Expected >= 30 point drop over 2 steps, got {two_step_drop}"
+    assert (
+        two_step_drop >= 30.0
+    ), f"Expected >= 30 point drop over 2 steps, got {two_step_drop}"
 
     # (d) Classified pattern
     assert classify_trust_pattern(sudden_history) == "SUDDEN_DROP"
-
 
     # 3. Direct Contrast of the Two Shapes:
     # Max single-step rate of decline in the sudden drop must be significantly steeper
@@ -111,7 +124,7 @@ def test_trust_history_stable_pattern():
             "timestamp": base_time + timedelta(seconds=i * 8),
             "risk_score": 0.0,
             "reported_nic": 9,
-            "is_alert": False
+            "is_alert": False,
         }
         for i in range(12)
     ]
@@ -126,12 +139,14 @@ def test_trust_history_empty_and_single():
     assert compute_weighted_rolling_trust([]) == []
     assert classify_trust_pattern([]) == "STABLE"
 
-    single = [{
-        "timestamp": datetime.now(timezone.utc),
-        "risk_score": 0.2,
-        "reported_nic": 8,
-        "is_alert": False
-    }]
+    single = [
+        {
+            "timestamp": datetime.now(timezone.utc),
+            "risk_score": 0.2,
+            "reported_nic": 8,
+            "is_alert": False,
+        }
+    ]
     hist_single = compute_weighted_rolling_trust(single, window=10)
     assert len(hist_single) == 1
     assert hist_single[0]["trust_score"] == 80.0
@@ -162,7 +177,7 @@ def test_evidence_confidence_and_unavailable_reasons():
         rule_flags=[False, False, False, False, None, None],
         ensemble_score=None,
         autoencoder_score=None,
-        trilateration_consistency=None
+        trilateration_consistency=None,
     )
     assert conf_rules == 0.40
     assert "Ensemble model features not fully available" in unav_rules
@@ -174,7 +189,7 @@ def test_evidence_confidence_and_unavailable_reasons():
         rule_flags=[False, False, False, False, None, None],
         ensemble_score=None,
         autoencoder_score=0.05,
-        trilateration_consistency=None
+        trilateration_consistency=None,
     )
     assert conf_ae == 0.70
     assert "Autoencoder history accumulating (< 5 observations)" not in unav_ae
@@ -186,7 +201,7 @@ def test_evidence_confidence_and_unavailable_reasons():
         rule_flags=[False, False, False, False, False, False],
         ensemble_score=0.10,
         autoencoder_score=0.05,
-        trilateration_consistency=0.02
+        trilateration_consistency=0.02,
     )
     assert conf_all == 1.0
     assert len(unav_all) == 0

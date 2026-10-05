@@ -1,19 +1,28 @@
 import os
 from datetime import datetime, timezone
+
 os.environ["RUN_INGESTION"] = "false"
+
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import schemathesis
-from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.main import app
+
+from app.api.deps import (
+    get_current_user,
+    require_admin,
+    require_analyst,
+    require_viewer,
+)
 from app.core.database import get_db
-from app.api.deps import get_current_user, require_viewer, require_analyst, require_admin
+from app.main import app
 from app.models import User
 
 # Disable Rate Limiting during contract testing to prevent 429 errors
 if hasattr(app.state, "limiter"):
     app.state.limiter.enabled = False
+
 
 @pytest.fixture(autouse=True)
 def contract_dependencies(monkeypatch):
@@ -62,13 +71,27 @@ def contract_dependencies(monkeypatch):
     app.dependency_overrides[require_admin] = mock_user_dependency
     # Keep schema generation independent from Redis socket timeouts. These mocks
     # do not represent service availability; that is checked separately.
-    monkeypatch.setattr("app.api.v1.endpoints.redis_client.get", AsyncMock(return_value=None))
-    monkeypatch.setattr("app.api.v1.endpoints.redis_client.setex", AsyncMock(return_value=True))
-    monkeypatch.setattr("app.api.v1.endpoints.redis_client.keys", AsyncMock(return_value=[]))
-    monkeypatch.setattr("app.api.v1.endpoints.redis_client.delete", AsyncMock(return_value=0))
-    monkeypatch.setattr("app.api.v1.endpoints.redis_client.publish", AsyncMock(return_value=1))
-    monkeypatch.setattr("app.api.v1.endpoints.redis_client.xlen", AsyncMock(return_value=0))
-    monkeypatch.setattr("app.api.v1.endpoints.redis_client.ping", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.redis_client.get", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.redis_client.setex", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.redis_client.keys", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.redis_client.delete", AsyncMock(return_value=0)
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.redis_client.publish", AsyncMock(return_value=1)
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.redis_client.xlen", AsyncMock(return_value=0)
+    )
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.redis_client.ping", AsyncMock(return_value=True)
+    )
 
     class ContractRouteService:
         async def get_or_fetch_route(self, icao24, callsign=None, db=None):
@@ -79,12 +102,21 @@ def contract_dependencies(monkeypatch):
                 "route_text": "Route unknown",
             }
 
-    monkeypatch.setattr("app.api.v1.endpoints.active_route_service", ContractRouteService())
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.active_route_service", ContractRouteService()
+    )
+
     class ContractIngestionService:
         async def request_manual_refresh(self):
-            return {"accepted": True, "queued": True, "source_status": "AWAITING_TELEMETRY"}
+            return {
+                "accepted": True,
+                "queued": True,
+                "source_status": "AWAITING_TELEMETRY",
+            }
 
-    monkeypatch.setattr("app.api.v1.endpoints.active_ingestion_service", ContractIngestionService())
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.active_ingestion_service", ContractIngestionService()
+    )
     monkeypatch.setattr(
         "app.ingestion.metadata_service.active_metadata_service.get_aircraft_metadata",
         AsyncMock(return_value={"source": "unavailable"}),
@@ -93,6 +125,7 @@ def contract_dependencies(monkeypatch):
     app.dependency_overrides.clear()
     app.dependency_overrides.update(previous)
 
+
 class ContractASGI:
     """Expose the HTTP ASGI app without restarting external services per case.
 
@@ -100,6 +133,7 @@ class ContractASGI:
     Starting models and Redis listeners for every generated contract example
     made this request-only contract test slow and coupled it to local services.
     """
+
     def __init__(self, application):
         self.application = application
 
@@ -120,6 +154,7 @@ class ContractASGI:
 # independently so Schemathesis does not restart model and Redis tasks per case.
 schema = schemathesis.openapi.from_asgi("/api/v1/openapi.json", ContractASGI(app))
 
+
 @schema.parametrize()
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_api_contracts(case):
@@ -128,7 +163,7 @@ def test_api_contracts(case):
     the API schema definitions using from_asgi.
     """
     response = case.call()
-    
+
     # Run positive schema conformance checks only to avoid negative-data false alarms
     case.validate_response(
         response,
@@ -137,5 +172,5 @@ def test_api_contracts(case):
             schemathesis.checks.status_code_conformance,
             schemathesis.checks.content_type_conformance,
             schemathesis.checks.response_schema_conformance,
-        )
+        ),
     )

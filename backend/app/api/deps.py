@@ -1,21 +1,18 @@
-from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import jwt, JWTError
-from sqlalchemy.ext.asyncio import AsyncSession
+from jose import JWTError, jwt
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
 from app.models import User
 
-reusable_oauth2 = OAuth2PasswordBearer(
-    tokenUrl=f"{settings.API_V1_STR}/auth/login"
-)
+reusable_oauth2 = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
+
 
 async def get_current_user(
-    db: AsyncSession = Depends(get_db),
-    token: str = Depends(reusable_oauth2)
+    db: AsyncSession = Depends(get_db), token: str = Depends(reusable_oauth2)
 ) -> User:
     try:
         payload = jwt.decode(
@@ -32,43 +29,43 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
         )
-    
+
     user_cache_key = f"cache:user:{token_data_sub}"
     try:
-        from app.core.redis import redis_client
         import json
+
+        from app.core.redis import redis_client
+
         cached_user = await redis_client.get(user_cache_key)
         if cached_user:
             data = json.loads(cached_user)
             return User(id=data["id"], email=data["email"], role=data["role"])
     except Exception:
         pass
-    
+
     if str(token_data_sub).isdigit():
         result = await db.execute(select(User).where(User.id == int(token_data_sub)))
     else:
-        result = await db.execute(select(User).where(User.email == str(token_data_sub).lower()))
+        result = await db.execute(
+            select(User).where(User.email == str(token_data_sub).lower())
+        )
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
     try:
         await redis_client.setex(
             user_cache_key,
             60,
-            json.dumps({"id": user.id, "email": user.email, "role": user.role})
+            json.dumps({"id": user.id, "email": user.email, "role": user.role}),
         )
     except Exception:
         pass
     return user
 
 
-async def get_websocket_user(
-    db: AsyncSession,
-    token: str
-) -> Optional[User]:
+async def get_websocket_user(db: AsyncSession, token: str) -> User | None:
     try:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
@@ -77,9 +74,13 @@ async def get_websocket_user(
         if token_data_sub is None:
             return None
         if str(token_data_sub).isdigit():
-            result = await db.execute(select(User).where(User.id == int(token_data_sub)))
+            result = await db.execute(
+                select(User).where(User.id == int(token_data_sub))
+            )
         else:
-            result = await db.execute(select(User).where(User.email == str(token_data_sub).lower()))
+            result = await db.execute(
+                select(User).where(User.email == str(token_data_sub).lower())
+            )
         return result.scalar_one_or_none()
     except Exception:
         return None
@@ -93,7 +94,7 @@ class RoleChecker:
         if current_user.role not in self.allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="The user does not have enough privileges"
+                detail="The user does not have enough privileges",
             )
         return current_user
 
