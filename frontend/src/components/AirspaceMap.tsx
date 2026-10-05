@@ -243,6 +243,12 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const [nearbyStatus, setNearbyStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [isNearbyOpen, setIsNearbyOpen] = useState<boolean>(false);
 
+  // Fullscreen & Right Sidebar state
+  const [isExpanded, setIsExpanded] = useState<boolean>(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
+  const [sidebarSearch, setSidebarSearch] = useState<string>('');
+  const [sidebarFilter, setSidebarFilter] = useState<'all' | 'suspicious' | 'critical'>('all');
+
   const latestFlightsRef = useRef<Flight[]>(flights);
   const latestSelectedFlightRef = useRef<Flight | null>(selectedFlight);
   const latestHoveredFlightRef = useRef<Flight | null>(hoveredFlight);
@@ -268,6 +274,21 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       .sort((a, b) => a.distance - b.distance)
       .slice(0, 8);
   }, [flights, nearbyLocation, isNearbyOpen]);
+
+  // Filtered flights for the enlarged right sidebar list
+  const filteredSidebarFlights = useMemo(() => {
+    return flights.filter((f) => {
+      if (sidebarFilter === 'critical' && f.status !== 'critical') return false;
+      if (sidebarFilter === 'suspicious' && f.status !== 'suspicious' && f.status !== 'critical') return false;
+      if (!sidebarSearch) return true;
+      const query = sidebarSearch.toLowerCase().trim();
+      const callsign = (f.callsign || '').toLowerCase();
+      const id = (f.id || '').toLowerCase();
+      const originCountry = (f.source || '').toLowerCase();
+      const airline = (getAirlineDisplayName(f.callsign) || '').toLowerCase();
+      return callsign.includes(query) || id.includes(query) || originCountry.includes(query) || airline.includes(query);
+    });
+  }, [flights, sidebarSearch, sidebarFilter]);
 
   const locateNearbyAircraft = () => {
     if (!navigator.geolocation) {
@@ -435,6 +456,39 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     };
   }, [renderCanvas]);
 
+  // Map resize handler on full-screen / sidebar changes
+  useEffect(() => {
+    const handleMapResize = () => {
+      if (mapRef.current) {
+        mapRef.current.invalidateSize();
+      }
+      renderCanvas();
+    };
+
+    handleMapResize();
+    const t1 = setTimeout(handleMapResize, 50);
+    const t2 = setTimeout(handleMapResize, 150);
+    const t3 = setTimeout(handleMapResize, 350);
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [isExpanded, isSidebarOpen, renderCanvas]);
+
+  // Handle ESC key to exit full screen mode
+  useEffect(() => {
+    if (!isExpanded) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsExpanded(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isExpanded]);
+
   // Initialize Map
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
@@ -526,9 +580,10 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       if (clicked) {
         onSelectFlightRef.current?.(clicked);
         setActiveFloatingFlight(clicked);
+        setIsSidebarOpen(true);
       } else {
         const target = e.target as HTMLElement;
-        if (!target?.closest('.airguard-floating-card')) {
+        if (!target?.closest('.airguard-floating-card') && !target?.closest('.airguard-expanded-sidebar')) {
           setActiveFloatingFlight(null);
         }
       }
@@ -670,330 +725,723 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
 
   const hoveredAirline = hoveredFlight ? getAirlineInfo(hoveredFlight.callsign) : null;
   const activeAirline = activeFloatingFlight ? getAirlineInfo(activeFloatingFlight.callsign) : null;
+  const activeDetailedFlight = selectedFlight || activeFloatingFlight;
+  const detailedAirline = activeDetailedFlight ? getAirlineInfo(activeDetailedFlight.callsign) : null;
 
   return (
-    <div className="relative w-full h-full bg-[#0b1220] overflow-hidden select-none">
-      {/* 2D Leaflet Map Container */}
-      <div ref={mapContainerRef} className="w-full h-full z-0" />
+    <div
+      className={`relative w-full h-full bg-[#0b1220] overflow-hidden select-none ${
+        isExpanded
+          ? 'fixed inset-0 z-[99999] w-screen h-screen flex flex-col md:flex-row bg-[#060913]'
+          : ''
+      }`}
+    >
+      {/* Main Map Canvas Area */}
+      <div className="flex-1 h-full relative overflow-hidden flex flex-col min-w-0">
+        {/* 2D Leaflet Map Container */}
+        <div ref={mapContainerRef} className="w-full h-full z-0 flex-1" />
 
-      {/* Hardware-Accelerated Viewport Canvas Overlay (Positioned above map tiles, zIndex 400) */}
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 pointer-events-none z-[400] w-full h-full"
-      />
+        {/* Hardware-Accelerated Viewport Canvas Overlay */}
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0 pointer-events-none z-[400] w-full h-full"
+        />
 
-      {/* Quick Region Navigation Bar */}
-      <div className="absolute top-4 left-4 z-[450] max-w-[calc(100%-2rem)] flex items-center gap-1.5 overflow-x-auto bg-[#0b1220]/90 backdrop-blur-xl px-2.5 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-medium text-slate-200">
-        <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mr-1 shrink-0">Region</span>
-        {REGION_CENTERS.map((reg) => (
-          <button
-            key={reg.name}
-            onClick={() => zoomToRegion(reg.name, reg.lat, reg.lng, reg.zoom)}
-            className={`px-2.5 py-1.5 rounded-lg transition-all font-semibold whitespace-nowrap ${
-              activeRegion === reg.name
-                ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40 shadow-[0_0_10px_rgba(6,182,212,0.25)]'
-                : 'text-slate-300 hover:bg-white/10'
-            }`}
-          >
-            {reg.name}
-          </button>
-        ))}
-        <span className="text-slate-700">|</span>
-        <button
-          onClick={centerAllFlights}
-          className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 transition-all font-semibold whitespace-nowrap flex items-center gap-1"
-          title="Center map to encompass all detected aircraft"
-        >
-          <span>⤢</span>
-          <span>Fit All</span>
-        </button>
-      </div>
-
-      {/* Hover Tooltip with Company/Airline Name */}
-      {hoveredFlight && hoverPos && !activeFloatingFlight && (
-        <div
-          className="pointer-events-none absolute z-[550] -translate-x-1/2 -translate-y-full mb-2 bg-[#0b1220]/95 border border-cyan-500/40 rounded-xl px-3 py-2 shadow-2xl backdrop-blur-md text-white font-mono text-[11px] whitespace-nowrap animate-in fade-in duration-100"
-          style={{ left: hoverPos.x, top: hoverPos.y - 14 }}
-        >
-          <div className="flex items-center gap-2">
-            <span
-              className={`w-2.5 h-2.5 rounded-full ${
-                hoveredFlight.status === 'critical'
-                  ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.8)]'
-                  : hoveredFlight.status === 'suspicious'
-                  ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.8)]'
-                  : 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]'
+        {/* Quick Region Navigation Bar */}
+        <div className="absolute top-4 left-4 z-[450] max-w-[calc(100%-8rem)] sm:max-w-[calc(100%-20rem)] flex items-center gap-1.5 overflow-x-auto bg-[#0b1220]/90 backdrop-blur-xl px-2.5 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-medium text-slate-200">
+          <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mr-1 shrink-0">Region</span>
+          {REGION_CENTERS.map((reg) => (
+            <button
+              key={reg.name}
+              onClick={() => zoomToRegion(reg.name, reg.lat, reg.lng, reg.zoom)}
+              className={`px-2.5 py-1.5 rounded-lg transition-all font-semibold whitespace-nowrap ${
+                activeRegion === reg.name
+                  ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40 shadow-[0_0_10px_rgba(6,182,212,0.25)]'
+                  : 'text-slate-300 hover:bg-white/10'
               }`}
-            />
-            <span className="font-bold text-slate-100 text-xs">{hoveredFlight.callsign || 'UNKNOWN'}</span>
-            {hoveredAirline && hoveredAirline.name && (
-              <span
-                className="text-[10px] font-sans font-semibold px-1.5 py-0.5 rounded text-white"
-                style={{ backgroundColor: `${hoveredAirline.color}33`, borderColor: `${hoveredAirline.color}88`, borderWidth: '1px' }}
-              >
-                {hoveredAirline.name}
-              </span>
-            )}
-            <span className="text-slate-400 text-[10px]">({hoveredFlight.id.toUpperCase()})</span>
-          </div>
-          <div className="text-[10px] text-slate-300 mt-1 flex items-center gap-2">
-            <span>Alt: {formatObservedNumber(hoveredFlight.data_quality, 'altitude', hoveredFlight.altitude)} ft</span>
-            <span>•</span>
-            <span>Spd: {formatObservedNumber(hoveredFlight.data_quality, 'velocity', hoveredFlight.speed)} kt</span>
-            <span>•</span>
-            <span className="text-cyan-300">
-              Trust: {Number.isFinite(hoveredFlight.trustScore) ? `${hoveredFlight.trustScore}%` : 'N/A'}
-            </span>
-          </div>
+            >
+              {reg.name}
+            </button>
+          ))}
+          <span className="text-slate-700">|</span>
+          <button
+            onClick={centerAllFlights}
+            className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 transition-all font-semibold whitespace-nowrap flex items-center gap-1"
+            title="Center map to encompass all detected aircraft"
+          >
+            <span>⤢</span>
+            <span>Fit All</span>
+          </button>
         </div>
-      )}
 
-      {/* Floating Lightweight Flight Label Card */}
-      {activeFloatingFlight && (
-        <div className="airguard-floating-card absolute bottom-5 left-5 z-[500] bg-[#0b1220]/95 backdrop-blur-xl text-white border border-white/15 rounded-2xl p-4 shadow-2xl shadow-black/60 w-[min(23rem,calc(100%-2.5rem))] animate-in fade-in slide-in-from-bottom-3 duration-150">
-          <div className="flex items-center justify-between border-b border-white/10 pb-2.5 mb-3">
+        {/* Hover Tooltip with Company/Airline Name */}
+        {hoveredFlight && hoverPos && !activeFloatingFlight && !isExpanded && (
+          <div
+            className="pointer-events-none absolute z-[550] -translate-x-1/2 -translate-y-full mb-2 bg-[#0b1220]/95 border border-cyan-500/40 rounded-xl px-3 py-2 shadow-2xl backdrop-blur-md text-white font-mono text-[11px] whitespace-nowrap animate-in fade-in duration-100"
+            style={{ left: hoverPos.x, top: hoverPos.y - 14 }}
+          >
             <div className="flex items-center gap-2">
               <span
                 className={`w-2.5 h-2.5 rounded-full ${
-                  activeFloatingFlight.status === 'critical'
-                    ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.6)]'
-                    : activeFloatingFlight.status === 'suspicious'
-                    ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.6)]'
-                    : activeFloatingFlight.status === 'normal'
-                    ? 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.6)]'
-                    : 'bg-slate-500'
+                  hoveredFlight.status === 'critical'
+                    ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.8)]'
+                    : hoveredFlight.status === 'suspicious'
+                    ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.8)]'
+                    : 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]'
                 }`}
               />
-              <div className="flex flex-col">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-mono text-base font-bold tracking-wide text-white">
-                    {activeFloatingFlight.callsign || 'N/A'}
-                  </span>
-                  <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/60 border border-cyan-500/30 px-1.5 py-0.2 rounded">
-                    {activeFloatingFlight.id.toUpperCase()}
-                  </span>
+              <span className="font-bold text-slate-100 text-xs">{hoveredFlight.callsign || 'UNKNOWN'}</span>
+              {hoveredAirline && hoveredAirline.name && (
+                <span
+                  className="text-[10px] font-sans font-semibold px-1.5 py-0.5 rounded text-white"
+                  style={{ backgroundColor: `${hoveredAirline.color}33`, borderColor: `${hoveredAirline.color}88`, borderWidth: '1px' }}
+                >
+                  {hoveredAirline.name}
+                </span>
+              )}
+              <span className="text-slate-400 text-[10px]">({hoveredFlight.id.toUpperCase()})</span>
+            </div>
+            <div className="text-[10px] text-slate-300 mt-1 flex items-center gap-2">
+              <span>Alt: {formatObservedNumber(hoveredFlight.data_quality, 'altitude', hoveredFlight.altitude)} ft</span>
+              <span>•</span>
+              <span>Spd: {formatObservedNumber(hoveredFlight.data_quality, 'velocity', hoveredFlight.speed)} kt</span>
+              <span>•</span>
+              <span className="text-cyan-300">
+                Trust: {Number.isFinite(hoveredFlight.trustScore) ? `${hoveredFlight.trustScore}%` : 'N/A'}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Floating Lightweight Flight Label Card (Standard View) */}
+        {activeFloatingFlight && !isExpanded && (
+          <div className="airguard-floating-card absolute bottom-5 left-5 z-[500] bg-[#0b1220]/95 backdrop-blur-xl text-white border border-white/15 rounded-2xl p-4 shadow-2xl shadow-black/60 w-[min(23rem,calc(100%-2.5rem))] animate-in fade-in slide-in-from-bottom-3 duration-150">
+            <div className="flex items-center justify-between border-b border-white/10 pb-2.5 mb-3">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    activeFloatingFlight.status === 'critical'
+                      ? 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.6)]'
+                      : activeFloatingFlight.status === 'suspicious'
+                      ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.6)]'
+                      : activeFloatingFlight.status === 'normal'
+                      ? 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.6)]'
+                      : 'bg-slate-500'
+                  }`}
+                />
+                <div className="flex flex-col">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono text-base font-bold tracking-wide text-white">
+                      {activeFloatingFlight.callsign || 'N/A'}
+                    </span>
+                    <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/60 border border-cyan-500/30 px-1.5 py-0.2 rounded">
+                      {activeFloatingFlight.id.toUpperCase()}
+                    </span>
+                  </div>
+                  {activeAirline && (
+                    <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1 mt-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: activeAirline.color }} />
+                      {activeAirline.name} {activeAirline.country ? `(${activeAirline.country})` : ''}
+                    </span>
+                  )}
                 </div>
-                {activeAirline && (
-                  <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1 mt-0.5">
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: activeAirline.color }} />
-                    {activeAirline.name} {activeAirline.country ? `(${activeAirline.country})` : ''}
-                  </span>
-                )}
+              </div>
+              <button
+                onClick={() => setActiveFloatingFlight(null)}
+                className="text-slate-400 hover:text-white text-lg leading-none px-1 transition-colors"
+                title="Close card"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-center text-xs mb-3">
+              <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
+                <div className="text-[9px] uppercase tracking-wider text-slate-400">Altitude</div>
+                <div className="font-mono font-bold text-slate-100">
+                  {formatObservedNumber(activeFloatingFlight.data_quality, 'altitude', activeFloatingFlight.altitude)}{' '}
+                  <span className="text-[10px] font-normal text-slate-400">FT</span>
+                </div>
+              </div>
+              <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
+                <div className="text-[9px] uppercase tracking-wider text-slate-400">Speed</div>
+                <div className="font-mono font-bold text-slate-100">
+                  {formatObservedNumber(activeFloatingFlight.data_quality, 'velocity', activeFloatingFlight.speed)}{' '}
+                  <span className="text-[10px] font-normal text-slate-400">KT</span>
+                </div>
+              </div>
+              <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
+                <div className="text-[9px] uppercase tracking-wider text-slate-400">Trust Index</div>
+                <div
+                  className={`font-mono font-bold ${
+                    !Number.isFinite(activeFloatingFlight.trustScore)
+                      ? 'text-slate-400'
+                      : activeFloatingFlight.trustScore >= 70
+                      ? 'text-emerald-400'
+                      : activeFloatingFlight.trustScore >= 40
+                      ? 'text-amber-400'
+                      : 'text-rose-400'
+                  }`}
+                >
+                  {Number.isFinite(activeFloatingFlight.trustScore) ? `${activeFloatingFlight.trustScore}%` : 'UNASSESSED'}
+                </div>
               </div>
             </div>
+
             <button
-              onClick={() => setActiveFloatingFlight(null)}
-              className="text-slate-400 hover:text-white text-lg leading-none px-1 transition-colors"
-              title="Close card"
+              onClick={() => {
+                onOpenFlightDetails(activeFloatingFlight);
+              }}
+              className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-900/30 transition-all flex items-center justify-center gap-1.5"
             >
-              &times;
+              <span>Inspect Telemetry &amp; Detection Matrix</span>
+              <span className="text-sm">→</span>
             </button>
           </div>
+        )}
 
-          <div className="grid grid-cols-3 gap-2 text-center text-xs mb-3">
-            <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
-              <div className="text-[9px] uppercase tracking-wider text-slate-400">Altitude</div>
-              <div className="font-mono font-bold text-slate-100">
-                {formatObservedNumber(activeFloatingFlight.data_quality, 'altitude', activeFloatingFlight.altitude)}{' '}
-                <span className="text-[10px] font-normal text-slate-400">FT</span>
-              </div>
+        {/* Top-Right Control Toolbar: Fullscreen Toggle, Live Count, Follow Mode */}
+        <div className="absolute top-4 right-3 sm:right-4 z-[450] flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            {/* Fullscreen / Enlarge Map Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setIsExpanded((prev) => !prev);
+                if (!isExpanded) setIsSidebarOpen(true);
+              }}
+              aria-label={isExpanded ? 'Exit full screen map' : 'Enlarge map to full screen'}
+              title={isExpanded ? 'Exit full screen (Esc)' : 'Enlarge map to full screen'}
+              className="bg-[#0b1220]/95 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-cyan-500/40 hover:border-cyan-400/70 backdrop-blur-xl px-3 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <span className="text-sm leading-none">{isExpanded ? '🗗' : '⛶'}</span>
+              <span className="hidden sm:inline">{isExpanded ? 'Exit Fullscreen' : 'Enlarge Map'}</span>
+            </button>
+
+            {/* Live Airspace Count */}
+            <div className="bg-[#0b1220]/90 backdrop-blur-xl px-3 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-2.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.55)] animate-pulse" />
+              <span>Live airspace</span>
+              <span className="text-[11px] text-slate-400 border-l border-white/10 pl-2.5 font-mono">
+                {flights.length.toLocaleString()}
+              </span>
             </div>
-            <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
-              <div className="text-[9px] uppercase tracking-wider text-slate-400">Speed</div>
-              <div className="font-mono font-bold text-slate-100">
-                {formatObservedNumber(activeFloatingFlight.data_quality, 'velocity', activeFloatingFlight.speed)}{' '}
-                <span className="text-[10px] font-normal text-slate-400">KT</span>
-              </div>
-            </div>
-            <div className="bg-slate-800/70 p-1.5 rounded-lg border border-slate-700/40">
-              <div className="text-[9px] uppercase tracking-wider text-slate-400">Trust Index</div>
-              <div
-                className={`font-mono font-bold ${
-                  !Number.isFinite(activeFloatingFlight.trustScore)
-                    ? 'text-slate-400'
-                    : activeFloatingFlight.trustScore >= 70
-                    ? 'text-emerald-400'
-                    : activeFloatingFlight.trustScore >= 40
-                    ? 'text-amber-400'
-                    : 'text-rose-400'
-                }`}
+
+            {/* Reopen Sidebar Button in Expanded Mode */}
+            {isExpanded && !isSidebarOpen && (
+              <button
+                type="button"
+                onClick={() => setIsSidebarOpen(true)}
+                className="bg-cyan-600/90 hover:bg-cyan-500 text-white px-3 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5"
+                title="Open flight details sidebar"
               >
-                {Number.isFinite(activeFloatingFlight.trustScore) ? `${activeFloatingFlight.trustScore}%` : 'UNASSESSED'}
-              </div>
-            </div>
+                <span>◀</span>
+                <span>Flight Details</span>
+              </button>
+            )}
           </div>
 
-          <button
-            onClick={() => {
-              onOpenFlightDetails(activeFloatingFlight);
-            }}
-            className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-900/30 transition-all flex items-center justify-center gap-1.5"
-          >
-            <span>Inspect Telemetry &amp; Detection Matrix</span>
-            <span className="text-sm">→</span>
-          </button>
+          {selectedFlight && (
+            <button
+              type="button"
+              onClick={() => setFollowSelected((val) => !val)}
+              aria-pressed={followSelected}
+              className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur-xl transition-all ${
+                followSelected
+                  ? 'border-cyan-400/50 bg-cyan-950/90 text-cyan-200 shadow-[0_0_12px_rgba(6,182,212,0.3)]'
+                  : 'border-white/10 bg-[#0b1220]/90 text-slate-300 hover:text-white'
+              }`}
+            >
+              {followSelected ? '◉ Following aircraft' : '○ Follow aircraft'}
+            </button>
+          )}
         </div>
-      )}
 
-      {/* Live Airspace Count & Follow Button */}
-      <div className="absolute top-[4.25rem] sm:top-4 right-3 sm:right-4 z-[450] flex flex-col items-end gap-2">
-        <div className="bg-[#0b1220]/90 backdrop-blur-xl px-3 py-2 rounded-xl shadow-xl border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-2.5">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.55)] animate-pulse" />
-          <span>Live airspace</span>
-          <span className="text-[11px] text-slate-400 border-l border-white/10 pl-2.5 font-mono">
-            {flights.length.toLocaleString()} aircraft
+        {/* Signal Status Legend */}
+        <div className="absolute bottom-4 right-4 z-[450] hidden sm:flex items-center gap-3 bg-[#0b1220]/85 backdrop-blur-xl px-3 py-2 rounded-xl border border-white/10 text-[10px] text-slate-300 shadow-lg">
+          <span className="font-semibold text-slate-500 uppercase tracking-wider">Status</span>
+          <span className="flex items-center gap-1.5">
+            <i className="w-2 h-2 rounded-full bg-sky-400 inline-block shadow-[0_0_6px_rgba(56,189,248,0.5)]" />
+            Nominal
+          </span>
+          <span className="flex items-center gap-1.5">
+            <i className="w-2 h-2 rounded-full bg-amber-400 inline-block shadow-[0_0_6px_rgba(245,158,11,0.5)]" />
+            Review
+          </span>
+          <span className="flex items-center gap-1.5">
+            <i className="w-2 h-2 rounded-full bg-rose-400 inline-block shadow-[0_0_6px_rgba(244,63,94,0.5)]" />
+            Critical
           </span>
         </div>
 
-        {selectedFlight && (
+        {/* Geolocation / Nearby Aircraft Drawer */}
+        <div className="absolute bottom-4 left-4 z-[450] w-[min(22rem,calc(100%-2rem))]">
+          {isNearbyOpen && (
+            <section
+              className="mb-2 overflow-hidden rounded-xl border border-slate-700/80 bg-[#08111f]/[.97] shadow-2xl backdrop-blur-xl"
+              aria-label="Nearby aircraft"
+            >
+              <div className="flex items-center justify-between border-b border-white/10 px-3.5 py-3">
+                <div>
+                  <h2 className="m-0 text-sm font-semibold text-white">Aircraft near me</h2>
+                  <p className="m-0 mt-0.5 text-[10px] text-slate-400">Live reports within 120 km · sorted by distance</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsNearbyOpen(false)}
+                  aria-label="Close nearby aircraft"
+                  className="px-2 text-lg text-slate-400 hover:text-white cursor-pointer"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="max-h-64 overflow-y-auto p-2.5">
+                {!nearbyLocation && (
+                  <div className="px-1 py-2">
+                    <p className="m-0 text-xs leading-relaxed text-slate-300">
+                      Use your device location to see which reported aircraft are closest to you.
+                    </p>
+                    <p className="mb-3 mt-1.5 text-[10px] leading-relaxed text-slate-500">
+                      Location is used in this browser only. AirGuard does not send it to the server.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={locateNearbyAircraft}
+                      disabled={nearbyStatus === 'loading'}
+                      className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-60 cursor-pointer"
+                    >
+                      {nearbyStatus === 'loading' ? 'Finding your location…' : 'Use my location'}
+                    </button>
+                    {nearbyStatus === 'error' && (
+                      <p role="status" className="mb-0 mt-2 text-[10px] text-amber-300">
+                        Location is unavailable. Allow location access and try again, or check browser location settings.
+                      </p>
+                    )}
+                  </div>
+                )}
+                {nearbyLocation && (
+                  <>
+                    <div className="flex items-center justify-between px-1 pb-2 text-[10px] text-slate-400">
+                      <span>
+                        {nearbyFlights.length} nearby report{nearbyFlights.length === 1 ? '' : 's'} found
+                      </span>
+                      <button type="button" onClick={locateNearbyAircraft} className="text-cyan-300 hover:text-cyan-100 cursor-pointer">
+                        Refresh location
+                      </button>
+                    </div>
+                    {nearbyFlights.length === 0 ? (
+                      <p className="px-1 py-3 text-xs text-slate-400">
+                        No aircraft reports within 120 km in the current feed. Coverage and transponder visibility vary by area.
+                      </p>
+                    ) : (
+                      nearbyFlights.map(({ flight, distance, airline }) => {
+                        const stale = flight.staleness_status === 'STALE';
+                        return (
+                          <button
+                            key={flight.id}
+                            type="button"
+                            onClick={() => {
+                              onSelectFlight(flight);
+                              setActiveFloatingFlight(flight);
+                              setFollowSelected(true);
+                              if (isExpanded) setIsSidebarOpen(true);
+                            }}
+                            className="mb-1.5 flex w-full items-center justify-between gap-3 rounded-lg border border-white/[.08] bg-white/[.03] px-3 py-2 text-left hover:border-cyan-500/40 hover:bg-cyan-500/[.06] cursor-pointer"
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate text-xs font-semibold text-slate-100">
+                                {airline && !airline.includes('Flight') ? `${airline} (${flight.callsign || 'N/A'})` : flight.callsign || 'Unknown'}
+                              </span>
+                              <span className="mt-0.5 block text-[10px] text-slate-400">
+                                {formatObservedNumber(flight.data_quality, 'altitude', flight.altitude)} ft ·{' '}
+                                {stale ? `last report ${Math.round(flight.last_seen_seconds_ago ?? 0)}s ago` : 'recent report'}
+                              </span>
+                            </span>
+                            <span className="shrink-0 text-right">
+                              <span className="block font-mono text-xs font-semibold text-cyan-200">
+                                {distance < 10 ? distance.toFixed(1) : Math.round(distance)} km
+                              </span>
+                              <span className="text-[9px] text-slate-500">ground distance</span>
+                            </span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </>
+                )}
+              </div>
+            </section>
+          )}
           <button
             type="button"
-            onClick={() => setFollowSelected((val) => !val)}
-            aria-pressed={followSelected}
-            className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur-xl transition-all ${
-              followSelected
-                ? 'border-cyan-400/50 bg-cyan-950/90 text-cyan-200 shadow-[0_0_12px_rgba(6,182,212,0.3)]'
-                : 'border-white/10 bg-[#0b1220]/90 text-slate-300 hover:text-white'
-            }`}
+            onClick={() => {
+              setIsNearbyOpen((open) => !open);
+              setActiveFloatingFlight(null);
+            }}
+            aria-expanded={isNearbyOpen}
+            className="flex items-center gap-2 rounded-lg border border-white/15 bg-[#0b1220]/95 px-3 py-2.5 text-xs font-semibold text-slate-100 shadow-xl backdrop-blur-xl hover:border-cyan-400/50 hover:text-cyan-100 cursor-pointer"
           >
-            {followSelected ? '◉ Following aircraft' : '○ Follow aircraft'}
+            <span aria-hidden="true" className="text-cyan-300">
+              ◎
+            </span>
+            Aircraft near me
+            {nearbyLocation && (
+              <span className="rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[9px] text-cyan-200">
+                {nearbyFlights.length}
+              </span>
+            )}
           </button>
-        )}
+        </div>
       </div>
 
-      {/* Signal Status Legend */}
-      <div className="absolute bottom-4 right-4 z-[450] hidden sm:flex items-center gap-3 bg-[#0b1220]/85 backdrop-blur-xl px-3 py-2 rounded-xl border border-white/10 text-[10px] text-slate-300 shadow-lg">
-        <span className="font-semibold text-slate-500 uppercase tracking-wider">Status</span>
-        <span className="flex items-center gap-1.5">
-          <i className="w-2 h-2 rounded-full bg-sky-400 inline-block shadow-[0_0_6px_rgba(56,189,248,0.5)]" />
-          Nominal
-        </span>
-        <span className="flex items-center gap-1.5">
-          <i className="w-2 h-2 rounded-full bg-amber-400 inline-block shadow-[0_0_6px_rgba(245,158,11,0.5)]" />
-          Review
-        </span>
-        <span className="flex items-center gap-1.5">
-          <i className="w-2 h-2 rounded-full bg-rose-400 inline-block shadow-[0_0_6px_rgba(244,63,94,0.5)]" />
-          Critical
-        </span>
-      </div>
-
-      {/* Geolocation / Nearby Aircraft Drawer */}
-      <div className="absolute bottom-4 left-4 z-[450] w-[min(22rem,calc(100%-2rem))]">
-        {isNearbyOpen && (
-          <section
-            className="mb-2 overflow-hidden rounded-xl border border-slate-700/80 bg-[#08111f]/[.97] shadow-2xl backdrop-blur-xl"
-            aria-label="Nearby aircraft"
-          >
-            <div className="flex items-center justify-between border-b border-white/10 px-3.5 py-3">
-              <div>
-                <h2 className="m-0 text-sm font-semibold text-white">Aircraft near me</h2>
-                <p className="m-0 mt-0.5 text-[10px] text-slate-400">Live reports within 120 km · sorted by distance</p>
-              </div>
+      {/* Enlarged Map Right Sidebar (Flight Details & Target Matrix) */}
+      {isExpanded && isSidebarOpen && (
+        <aside className="airguard-expanded-sidebar w-full md:w-[380px] lg:w-[420px] xl:w-[450px] shrink-0 h-full bg-[#081020]/98 border-t md:border-t-0 md:border-l border-cyan-500/20 backdrop-blur-2xl flex flex-col z-[460] shadow-2xl overflow-hidden animate-in slide-in-from-right duration-200 select-text">
+          {/* Sidebar Header */}
+          <div className="flex items-center justify-between border-b border-white/10 px-4 py-3 bg-[#0b1426]/90 shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(6,182,212,0.8)] animate-pulse" />
+              <h2 className="text-sm font-semibold text-white tracking-wide m-0">
+                {activeDetailedFlight ? 'Flight Telemetry & Analysis' : 'Airspace Aircraft Monitor'}
+              </h2>
+            </div>
+            <div className="flex items-center gap-2">
+              {activeDetailedFlight && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveFloatingFlight(null);
+                    onSelectFlight(null);
+                  }}
+                  className="text-[10px] font-semibold text-cyan-300 hover:text-white px-2 py-1 rounded-md bg-cyan-950/60 border border-cyan-500/30 hover:bg-cyan-900/80 transition-all cursor-pointer"
+                >
+                  All Aircraft
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => setIsNearbyOpen(false)}
-                aria-label="Close nearby aircraft"
-                className="px-2 text-lg text-slate-400 hover:text-white"
+                onClick={() => setIsSidebarOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors text-sm cursor-pointer"
+                title="Collapse sidebar"
+                aria-label="Collapse sidebar"
               >
-                ×
+                ▶
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsExpanded(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors text-sm cursor-pointer"
+                title="Exit Fullscreen (Esc)"
+                aria-label="Exit Fullscreen"
+              >
+                🗗
               </button>
             </div>
-            <div className="max-h-64 overflow-y-auto p-2.5">
-              {!nearbyLocation && (
-                <div className="px-1 py-2">
-                  <p className="m-0 text-xs leading-relaxed text-slate-300">
-                    Use your device location to see which reported aircraft are closest to you.
+          </div>
+
+          {/* Sidebar Body */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            {activeDetailedFlight ? (
+              <>
+                {/* 1. Target Identity & Airline Banner */}
+                <div className="bg-[#0b1424] border border-cyan-500/30 rounded-xl p-3.5 shadow-lg relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 rounded-full blur-2xl pointer-events-none" />
+                  <div className="flex items-start justify-between gap-2 relative z-10">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xl font-bold tracking-wider text-white">
+                          {activeDetailedFlight.callsign || 'NO CALLSIGN'}
+                        </span>
+                        <span className="text-[11px] font-mono text-cyan-300 bg-cyan-950/80 border border-cyan-500/40 px-2 py-0.5 rounded font-bold">
+                          {activeDetailedFlight.id.toUpperCase()}
+                        </span>
+                      </div>
+                      {detailedAirline && (
+                        <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-300 font-semibold">
+                          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: detailedAirline.color }} />
+                          <span>{detailedAirline.name}</span>
+                          {detailedAirline.country && <span className="text-slate-500 font-normal">({detailedAirline.country})</span>}
+                        </div>
+                      )}
+                      {activeDetailedFlight.source && (
+                        <div className="text-[10px] text-slate-400 mt-1 font-mono">
+                          Source: <span className="text-slate-200">{activeDetailedFlight.source}</span>
+                        </div>
+                      )}
+                    </div>
+                    <span
+                      className={`text-[10px] font-mono font-bold px-2 py-1 rounded-md uppercase border shrink-0 ${
+                        activeDetailedFlight.status === 'critical'
+                          ? 'bg-rose-950/90 text-rose-300 border-rose-500/60 shadow-[0_0_12px_rgba(244,63,94,0.4)]'
+                          : activeDetailedFlight.status === 'suspicious'
+                          ? 'bg-amber-950/90 text-amber-300 border-amber-500/60 shadow-[0_0_12px_rgba(245,158,11,0.3)]'
+                          : 'bg-cyan-950/90 text-cyan-300 border-cyan-500/50'
+                      }`}
+                    >
+                      {activeDetailedFlight.status === 'critical'
+                        ? 'CRITICAL'
+                        : activeDetailedFlight.status === 'suspicious'
+                        ? 'REVIEW'
+                        : 'NOMINAL'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 2. Trust Score Hero Card */}
+                <div className="bg-[#0c1626] border border-white/10 rounded-xl p-3.5 shadow-md">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Signal Trust Index</span>
+                    <span
+                      className={`text-base font-mono font-black ${
+                        !Number.isFinite(activeDetailedFlight.trustScore)
+                          ? 'text-slate-400'
+                          : activeDetailedFlight.trustScore >= 70
+                          ? 'text-emerald-400'
+                          : activeDetailedFlight.trustScore >= 40
+                          ? 'text-amber-400'
+                          : 'text-rose-400'
+                      }`}
+                    >
+                      {Number.isFinite(activeDetailedFlight.trustScore) ? `${activeDetailedFlight.trustScore}%` : 'UNASSESSED'}
+                    </span>
+                  </div>
+                  <div className="w-full bg-slate-800/80 rounded-full h-2 overflow-hidden mb-2">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        !Number.isFinite(activeDetailedFlight.trustScore)
+                          ? 'bg-slate-500 w-0'
+                          : activeDetailedFlight.trustScore >= 70
+                          ? 'bg-emerald-400'
+                          : activeDetailedFlight.trustScore >= 40
+                          ? 'bg-amber-400'
+                          : 'bg-rose-400'
+                      }`}
+                      style={{ width: `${Math.max(0, Math.min(100, activeDetailedFlight.trustScore || 0))}%` }}
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-400 m-0 leading-relaxed">
+                    {activeDetailedFlight.status === 'critical'
+                      ? 'Severe kinematic or transponder anomaly detected. Immediate review required.'
+                      : activeDetailedFlight.status === 'suspicious'
+                      ? 'Elevated residual variance or transponder drift detected.'
+                      : 'Signal vectors correlate consistently with physical kinematic flight bounds.'}
                   </p>
-                  <p className="mb-3 mt-1.5 text-[10px] leading-relaxed text-slate-500">
-                    Location is used in this browser only. AirGuard does not send it to the server.
-                  </p>
+                </div>
+
+                {/* 3. Comprehensive Kinematic Telemetry Grid */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-[#0b1424] border border-white/[0.08] p-2.5 rounded-xl">
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block">Altitude</span>
+                    <span className="font-mono text-sm font-bold text-white">
+                      {formatObservedNumber(activeDetailedFlight.data_quality, 'altitude', activeDetailedFlight.altitude)}
+                    </span>
+                    <span className="text-[10px] text-slate-400 ml-1">FT</span>
+                  </div>
+
+                  <div className="bg-[#0b1424] border border-white/[0.08] p-2.5 rounded-xl">
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block">Ground Speed</span>
+                    <span className="font-mono text-sm font-bold text-white">
+                      {formatObservedNumber(activeDetailedFlight.data_quality, 'velocity', activeDetailedFlight.speed)}
+                    </span>
+                    <span className="text-[10px] text-slate-400 ml-1">KT</span>
+                  </div>
+
+                  <div className="bg-[#0b1424] border border-white/[0.08] p-2.5 rounded-xl">
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block">True Heading</span>
+                    <span className="font-mono text-sm font-bold text-white">
+                      {Number.isFinite(activeDetailedFlight.heading) ? `${Math.round(activeDetailedFlight.heading)}°` : 'N/A'}
+                    </span>
+                  </div>
+
+                  <div className="bg-[#0b1424] border border-white/[0.08] p-2.5 rounded-xl">
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block">Vertical Rate</span>
+                    <span className="font-mono text-sm font-bold text-white">
+                      {activeDetailedFlight.verticalRate !== undefined && Number.isFinite(activeDetailedFlight.verticalRate)
+                        ? `${activeDetailedFlight.verticalRate > 0 ? '+' : ''}${Math.round(activeDetailedFlight.verticalRate * 196.85)}`
+                        : '0'}
+                    </span>
+                    <span className="text-[10px] text-slate-400 ml-1">FPM</span>
+                  </div>
+
+                  <div className="bg-[#0b1424] border border-white/[0.08] p-2.5 rounded-xl">
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block">Squawk Code</span>
+                    <span className="font-mono text-sm font-bold text-cyan-200">
+                      {activeDetailedFlight.squawk || 'N/A'}
+                    </span>
+                  </div>
+
+                  <div className="bg-[#0b1424] border border-white/[0.08] p-2.5 rounded-xl">
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block">Signal Staleness</span>
+                    <span className="font-mono text-xs font-bold text-slate-200">
+                      {activeDetailedFlight.last_seen_seconds_ago !== undefined
+                        ? `${Math.round(activeDetailedFlight.last_seen_seconds_ago)}s ago`
+                        : 'Live'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 4. Position & Geodesic Coordinates */}
+                <div className="bg-[#0b1424] border border-white/[0.08] p-3 rounded-xl">
+                  <span className="text-[10px] text-slate-400 uppercase font-semibold block mb-1">Geographic Coordinates</span>
+                  <div className="flex items-center justify-between font-mono text-xs text-slate-200">
+                    <span>LAT: <strong className="text-white">{activeDetailedFlight.lat.toFixed(4)}°</strong></span>
+                    <span>LNG: <strong className="text-white">{activeDetailedFlight.lng.toFixed(4)}°</strong></span>
+                  </div>
+                </div>
+
+                {/* 5. Route Information (if available) */}
+                {(activeDetailedFlight.estDepartureAirport || activeDetailedFlight.estArrivalAirport) && (
+                  <div className="bg-[#0b1424] border border-white/[0.08] p-3 rounded-xl">
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold block mb-1">Estimated Route</span>
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-emerald-300">{activeDetailedFlight.estDepartureAirport || 'DEP N/A'}</span>
+                      <span className="text-slate-500">⟶</span>
+                      <span className="text-sky-300">{activeDetailedFlight.estArrivalAirport || 'ARR N/A'}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* 6. Action Buttons */}
+                <div className="space-y-2 pt-2">
                   <button
                     type="button"
-                    onClick={locateNearbyAircraft}
-                    disabled={nearbyStatus === 'loading'}
-                    className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-60"
+                    onClick={() => {
+                      onOpenFlightDetails(activeDetailedFlight);
+                    }}
+                    className="w-full py-2.5 px-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-xl shadow-lg shadow-cyan-900/40 transition-all flex items-center justify-center gap-2 cursor-pointer"
                   >
-                    {nearbyStatus === 'loading' ? 'Finding your location…' : 'Use my location'}
+                    <span>Open Full Investigation Matrix</span>
+                    <span>→</span>
                   </button>
-                  {nearbyStatus === 'error' && (
-                    <p role="status" className="mb-0 mt-2 text-[10px] text-amber-300">
-                      Location is unavailable. Allow location access and try again, or check browser location settings.
-                    </p>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (mapRef.current) {
+                        mapRef.current.flyTo([activeDetailedFlight.lat, activeDetailedFlight.lng], 9, { duration: 0.8 });
+                        setFollowSelected(true);
+                      }
+                    }}
+                    className="w-full py-2 px-3 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <span>◉ Center &amp; Track Aircraft</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              /* No Flight Selected: Live Airspace Quick Selector */
+              <div className="space-y-3">
+                <div className="relative">
+                  <input
+                    type="search"
+                    value={sidebarSearch}
+                    onChange={(e) => setSidebarSearch(e.target.value)}
+                    placeholder="Search callsign, ICAO, or airline..."
+                    className="w-full rounded-xl border border-white/15 bg-slate-950/80 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 outline-none focus:border-cyan-400 transition-colors"
+                  />
+                  {sidebarSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setSidebarSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs cursor-pointer"
+                    >
+                      ×
+                    </button>
                   )}
                 </div>
-              )}
-              {nearbyLocation && (
-                <>
-                  <div className="flex items-center justify-between px-1 pb-2 text-[10px] text-slate-400">
-                    <span>
-                      {nearbyFlights.length} nearby report{nearbyFlights.length === 1 ? '' : 's'} found
-                    </span>
-                    <button type="button" onClick={locateNearbyAircraft} className="text-cyan-300 hover:text-cyan-100">
-                      Refresh location
+
+                <div className="flex gap-1.5 bg-[#0b1426] p-1 rounded-lg border border-white/10 text-xs">
+                  {(['all', 'suspicious', 'critical'] as const).map((filter) => (
+                    <button
+                      key={filter}
+                      type="button"
+                      onClick={() => setSidebarFilter(filter)}
+                      className={`flex-1 py-1 rounded text-[11px] font-semibold transition-all capitalize cursor-pointer ${
+                        sidebarFilter === filter
+                          ? 'bg-cyan-600 text-white shadow-md'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {filter}
                     </button>
-                  </div>
-                  {nearbyFlights.length === 0 ? (
-                    <p className="px-1 py-3 text-xs text-slate-400">
-                      No aircraft reports within 120 km in the current feed. Coverage and transponder visibility vary by area.
-                    </p>
+                  ))}
+                </div>
+
+                <div className="text-[10px] text-slate-400 px-1 font-mono">
+                  {filteredSidebarFlights.length} aircraft reporting in current sector
+                </div>
+
+                <div className="space-y-1.5 max-h-[calc(100vh-220px)] overflow-y-auto pr-1">
+                  {filteredSidebarFlights.length === 0 ? (
+                    <div className="p-6 text-center text-slate-400 text-xs border border-dashed border-white/10 rounded-xl">
+                      No matching aircraft found in current airspace sector.
+                    </div>
                   ) : (
-                    nearbyFlights.map(({ flight, distance, airline }) => {
-                      const stale = flight.staleness_status === 'STALE';
+                    filteredSidebarFlights.map((f) => {
+                      const airline = getAirlineDisplayName(f.callsign);
                       return (
                         <button
-                          key={flight.id}
+                          key={f.id}
                           type="button"
                           onClick={() => {
-                            onSelectFlight(flight);
-                            setFollowSelected(true);
+                            onSelectFlight(f);
+                            setActiveFloatingFlight(f);
+                            if (mapRef.current) {
+                              mapRef.current.flyTo([f.lat, f.lng], 8, { duration: 0.6 });
+                            }
                           }}
-                          className="mb-1.5 flex w-full items-center justify-between gap-3 rounded-lg border border-white/[.08] bg-white/[.03] px-3 py-2 text-left hover:border-cyan-500/40 hover:bg-cyan-500/[.06]"
+                          className="w-full text-left p-2.5 rounded-xl border border-white/[0.08] bg-[#0b1424]/80 hover:bg-cyan-950/40 hover:border-cyan-500/40 transition-all flex items-center justify-between gap-2 group cursor-pointer"
                         >
-                          <span className="min-w-0">
-                            <span className="block truncate text-xs font-semibold text-slate-100">
-                              {airline && !airline.includes('Flight') ? `${airline} (${flight.callsign || 'N/A'})` : flight.callsign || 'Unknown'}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`w-2 h-2 rounded-full ${
+                                  f.status === 'critical'
+                                    ? 'bg-rose-400 shadow-[0_0_6px_rgba(244,63,94,0.6)]'
+                                    : f.status === 'suspicious'
+                                    ? 'bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.6)]'
+                                    : 'bg-cyan-400'
+                                }`}
+                              />
+                              <span className="font-mono font-bold text-xs text-white group-hover:text-cyan-200">
+                                {f.callsign || 'N/A'}
+                              </span>
+                              <span className="text-[10px] font-mono text-slate-400">
+                                {f.id.toUpperCase()}
+                              </span>
+                            </div>
+                            {airline && (
+                              <span className="text-[10px] text-slate-400 block truncate mt-0.5">
+                                {airline}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="font-mono text-xs font-semibold text-slate-200 block">
+                              {Math.round(f.altitude).toLocaleString()} ft
                             </span>
-                            <span className="mt-0.5 block text-[10px] text-slate-400">
-                              {formatObservedNumber(flight.data_quality, 'altitude', flight.altitude)} ft ·{' '}
-                              {stale ? `last report ${Math.round(flight.last_seen_seconds_ago ?? 0)}s ago` : 'recent report'}
+                            <span
+                              className={`text-[10px] font-mono font-bold ${
+                                Number.isFinite(f.trustScore) && f.trustScore >= 70
+                                  ? 'text-emerald-400'
+                                  : Number.isFinite(f.trustScore) && f.trustScore >= 40
+                                  ? 'text-amber-400'
+                                  : 'text-rose-400'
+                              }`}
+                            >
+                              {Number.isFinite(f.trustScore) ? `${f.trustScore}%` : '—'}
                             </span>
-                          </span>
-                          <span className="shrink-0 text-right">
-                            <span className="block font-mono text-xs font-semibold text-cyan-200">
-                              {distance < 10 ? distance.toFixed(1) : Math.round(distance)} km
-                            </span>
-                            <span className="text-[9px] text-slate-500">ground distance</span>
-                          </span>
+                          </div>
                         </button>
                       );
                     })
                   )}
-                </>
-              )}
-            </div>
-          </section>
-        )}
-        <button
-          type="button"
-          onClick={() => {
-            setIsNearbyOpen((open) => !open);
-            setActiveFloatingFlight(null);
-          }}
-          aria-expanded={isNearbyOpen}
-          className="flex items-center gap-2 rounded-lg border border-white/15 bg-[#0b1220]/95 px-3 py-2.5 text-xs font-semibold text-slate-100 shadow-xl backdrop-blur-xl hover:border-cyan-400/50 hover:text-cyan-100"
-        >
-          <span aria-hidden="true" className="text-cyan-300">
-            ◎
-          </span>
-          Aircraft near me
-          {nearbyLocation && (
-            <span className="rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[9px] text-cyan-200">
-              {nearbyFlights.length}
-            </span>
-          )}
-        </button>
-      </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
     </div>
   );
 };
