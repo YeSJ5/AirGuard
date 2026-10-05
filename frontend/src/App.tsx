@@ -675,14 +675,24 @@ export default function App() {
     });
   }, [showcaseMode, reduceMotion, selectedFlightId, isChaseFlying, isSoundEnabled, setSelectedFlightId]);
 
+  // Target detail drawer open state
+  const [, setIsDetailDrawerOpen] = useState<boolean>(false);
+
   const handleMapSelectFlight = useCallback((flight: Flight | null) => {
     setSelectedFlightId(flight ? flight.id : null);
   }, [setSelectedFlightId]);
 
   const handleMapOpenDetails = useCallback((flight: Flight) => {
     setSelectedFlightId(flight.id);
+    setCurrentTier('tier2_radar');
     setIsDetailDrawerOpen(true);
-  }, [setSelectedFlightId]);
+    setTimeout(() => {
+      const el = document.getElementById('target-inspection-panel');
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 80);
+  }, [setSelectedFlightId, setCurrentTier]);
 
   // Login form state
   const [loginEmail, setLoginEmail] = useState("");
@@ -930,7 +940,6 @@ export default function App() {
   const [snapshotRevision, setSnapshotRevision] = useState(0);
 
   const [showDebugIndicator, setShowDebugIndicator] = useState<boolean>(false);
-  const [, setIsDetailDrawerOpen] = useState<boolean>(false);
 
   const realFlightsCount = useMemo(() => {
     return flights.filter((flight) => !flight.is_synthetic && flight.source !== 'regional_fallback' && flight.staleness_status !== 'STALE').length;
@@ -3620,7 +3629,7 @@ export default function App() {
           </section>
 
             {/* Right 35%: Target List OR Detail Drawer */}
-              <section className="col-span-12 min-h-[420px] lg:min-h-0 lg:col-span-3 bg-[#0b1220] border border-slate-700/70 rounded-xl flex flex-col overflow-hidden shadow-xl shadow-black/20">
+              <section id="target-inspection-panel" className="col-span-12 min-h-[420px] lg:min-h-0 lg:col-span-3 bg-[#0b1220] border border-slate-700/70 rounded-xl flex flex-col overflow-hidden shadow-xl shadow-black/20">
 
               {!selectedFlightId ? (
                 // Target List

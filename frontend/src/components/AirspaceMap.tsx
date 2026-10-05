@@ -944,6 +944,11 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
 
             <button
               onClick={() => {
+                if (isExpanded) {
+                  setIsExpanded(false);
+                  setIsSidebarOpen(false);
+                }
+                onSelectFlight(activeFloatingFlight);
                 onOpenFlightDetails(activeFloatingFlight);
               }}
               className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-900/30 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
@@ -1354,6 +1359,11 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                   <button
                     type="button"
                     onClick={() => {
+                      if (isExpanded) {
+                        setIsExpanded(false);
+                        setIsSidebarOpen(false);
+                      }
+                      onSelectFlight(activeDetailedFlight);
                       onOpenFlightDetails(activeDetailedFlight);
                     }}
                     className="w-full py-2.5 px-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-xl shadow-lg shadow-cyan-900/40 transition-all flex items-center justify-center gap-2 cursor-pointer"
