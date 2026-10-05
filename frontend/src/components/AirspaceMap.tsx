@@ -62,21 +62,19 @@ type MapLayerType = 'dark' | 'satellite' | 'street';
 const MAP_LAYERS: Record<MapLayerType, { name: string; url: string; subdomains?: string; maxZoom: number; attribution: string }> = {
   dark: {
     name: 'Dark Tactical',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    subdomains: 'abcd',
-    maxZoom: 20,
-    attribution: '&copy; CartoDB &copy; OpenStreetMap'
+    url: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    maxZoom: 18,
+    attribution: '&copy; Esri, DeLorme, NAVTEQ'
   },
   satellite: {
     name: 'Satellite Hybrid',
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     maxZoom: 18,
     attribution: '&copy; Esri &copy; Maxar'
   },
   street: {
     name: 'Aviation Standard',
-    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    subdomains: 'abc',
+    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors'
   }
@@ -102,7 +100,8 @@ function getFlightStatusTheme(flight: Flight) {
   const isCritical =
     status === 'critical' ||
     (typeof trust === 'number' && Number.isFinite(trust) && trust < 40) ||
-    (typeof risk === 'number' && Number.isFinite(risk) && risk >= 0.8);
+    (typeof risk === 'number' && Number.isFinite(risk) && risk >= 0.8) ||
+    assessment === 'CRITICAL';
 
   const isReview =
     status === 'suspicious' ||
@@ -112,8 +111,7 @@ function getFlightStatusTheme(flight: Flight) {
 
   const isUnassessed =
     status === 'unassessed' ||
-    assessment === 'INSUFFICIENT_EVIDENCE' ||
-    (!Number.isFinite(trust) && !Number.isFinite(risk) && status !== 'normal' && (status as string) !== 'nominal');
+    assessment === 'INSUFFICIENT_EVIDENCE';
 
   if (isCritical) {
     return {
@@ -947,9 +945,10 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const activeDetailedFlight = selectedFlight || activeFloatingFlight;
   const detailedAirline = activeDetailedFlight ? getAirlineInfo(activeDetailedFlight.callsign) : null;
 
-  const criticalCount = useMemo(() => flights.filter(f => f.status === 'critical').length, [flights]);
-  const reviewCount = useMemo(() => flights.filter(f => f.status === 'suspicious').length, [flights]);
-  const nominalCount = useMemo(() => flights.filter(f => f.status === 'normal').length, [flights]);
+  const criticalCount = useMemo(() => flights.filter(f => f.status === 'critical' || f.assessment_status === 'CRITICAL' || (f.trustScore !== undefined && f.trustScore !== null && Number.isFinite(f.trustScore) && f.trustScore < 40)).length, [flights]);
+  const reviewCount = useMemo(() => flights.filter(f => f.status === 'suspicious' || f.assessment_status === 'REVIEW_REQUIRED' || (f.trustScore !== undefined && f.trustScore !== null && Number.isFinite(f.trustScore) && f.trustScore >= 40 && f.trustScore < 70)).length, [flights]);
+  const unassessedCount = useMemo(() => flights.filter(f => f.status === 'unassessed' || f.assessment_status === 'INSUFFICIENT_EVIDENCE').length, [flights]);
+  const nominalCount = useMemo(() => Math.max(0, flights.length - criticalCount - reviewCount - unassessedCount), [flights.length, criticalCount, reviewCount, unassessedCount]);
 
   // Main Map JSX
   const mapContent = (

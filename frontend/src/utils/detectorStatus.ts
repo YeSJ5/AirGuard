@@ -8,9 +8,14 @@ export function displayableRisk(risk: number | null | undefined, assessmentStatu
 
 export function detectorStatusFromRisk(risk: number | null | undefined, assessmentStatus?: string | null): DetectorStatus {
   if (assessmentStatus === 'INSUFFICIENT_EVIDENCE') return 'unassessed';
-  if (typeof risk !== 'number' || !Number.isFinite(risk)) return 'unassessed';
-  if (risk >= 0.8 || assessmentStatus === 'REVIEW_REQUIRED') return 'critical';
-  if (risk >= 0.65) return 'suspicious';
+  if (typeof risk === 'number' && Number.isFinite(risk)) {
+    if (risk >= 0.8 || assessmentStatus === 'CRITICAL') return 'critical';
+    if (risk >= 0.65 || assessmentStatus === 'REVIEW_REQUIRED') return 'suspicious';
+    return 'normal';
+  }
+  if (assessmentStatus === 'CRITICAL') return 'critical';
+  if (assessmentStatus === 'REVIEW_REQUIRED') return 'suspicious';
   return 'normal';
 }
+
 
