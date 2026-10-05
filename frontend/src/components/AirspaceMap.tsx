@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { formatObservedNumber } from '../utils/dataQuality';
@@ -234,6 +235,9 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const routeLayerRef = useRef<L.LayerGroup | null>(null);
   const nearbyLayerRef = useRef<L.LayerGroup | null>(null);
 
+  const lastCenterRef = useRef<[number, number]>([21.5, 78.9]);
+  const lastZoomRef = useRef<number>(5);
+
   const [activeRegion, setActiveRegion] = useState<string>('All India');
   const [activeFloatingFlight, setActiveFloatingFlight] = useState<Flight | null>(null);
   const [hoveredFlight, setHoveredFlight] = useState<Flight | null>(null);
@@ -243,7 +247,8 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const [nearbyStatus, setNearbyStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [isNearbyOpen, setIsNearbyOpen] = useState<boolean>(false);
 
-  // Fullscreen & Right Sidebar state (Sidebar is HIDDEN by default in fullscreen)
+  // Fullscreen & Right Sidebar state
+  // Fullscreen is 100% window size; sidebar is HIDDEN by default until a flight or the 3 lines button is clicked
   const [isExpanded, setIsExpanded] = useState<boolean>(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
   const [sidebarSearch, setSidebarSearch] = useState<string>('');
@@ -456,34 +461,24 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     };
   }, [renderCanvas]);
 
-  // Map resize handler on full-screen / sidebar changes
+  // Lock body scroll when in expanded full-window mode
   useEffect(() => {
-    const handleMapResize = () => {
-      if (mapRef.current) {
-        mapRef.current.invalidateSize();
-      }
-      renderCanvas();
-    };
-
-    handleMapResize();
-    const t1 = setTimeout(handleMapResize, 50);
-    const t2 = setTimeout(handleMapResize, 150);
-    const t3 = setTimeout(handleMapResize, 350);
-
+    if (isExpanded) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
     return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
+      document.body.style.overflow = '';
     };
-  }, [isExpanded, isSidebarOpen, renderCanvas]);
+  }, [isExpanded]);
 
   // Fullscreen toggle handler
   const toggleFullscreen = useCallback(() => {
     setIsExpanded((prev) => {
       const next = !prev;
       if (next) {
-        // Enlarge to full screen: Keep sidebar hidden by default
-        setIsSidebarOpen(false);
+        setIsSidebarOpen(false); // Clean 100% window map on entry
       } else {
         setIsSidebarOpen(false);
       }
@@ -491,7 +486,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     });
   }, []);
 
-  // Handle ESC key to exit full screen mode
+  // Handle ESC key to exit full window mode
   useEffect(() => {
     if (!isExpanded) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -504,13 +499,31 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isExpanded]);
 
-  // Initialize Map
+  // Handle sidebar resize in expanded mode
   useEffect(() => {
-    if (!mapContainerRef.current || mapRef.current) return;
+    if (!mapRef.current) return;
+    const handleResize = () => {
+      mapRef.current?.invalidateSize();
+      renderCanvas();
+    };
+    handleResize();
+    const t1 = setTimeout(handleResize, 50);
+    const t2 = setTimeout(handleResize, 150);
+    const t3 = setTimeout(handleResize, 350);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [isSidebarOpen, renderCanvas]);
+
+  // Initialize Map whenever mounted (re-attaches cleanly when portaled to document.body)
+  useEffect(() => {
+    if (!mapContainerRef.current) return;
 
     const map = L.map(mapContainerRef.current, {
-      center: [21.5, 78.9],
-      zoom: 5,
+      center: lastCenterRef.current,
+      zoom: lastZoomRef.current,
       zoomControl: false,
       attributionControl: true,
       minZoom: 2,
@@ -530,11 +543,15 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     nearbyLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
 
-    // Invalidate map size after mounting
-    setTimeout(() => {
+    const handleResize = () => {
       map.invalidateSize();
       renderCanvas();
-    }, 50);
+    };
+
+    handleResize();
+    const t1 = setTimeout(handleResize, 50);
+    const t2 = setTimeout(handleResize, 150);
+    const t3 = setTimeout(handleResize, 350);
 
     const container = map.getContainer();
     const handleMouseMove = (e: MouseEvent) => {
@@ -611,24 +628,26 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
 
     container.addEventListener('mousemove', handleMouseMove);
     container.addEventListener('click', handleClick);
-
-    const onResize = () => {
-      map.invalidateSize();
-      renderCanvas();
-    };
-    window.addEventListener('resize', onResize);
+    window.addEventListener('resize', handleResize);
 
     return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
       container.removeEventListener('mousemove', handleMouseMove);
       container.removeEventListener('click', handleClick);
-      window.removeEventListener('resize', onResize);
-      if (continuousAnimRef.current) cancelAnimationFrame(continuousAnimRef.current);
-      map.remove();
+      window.removeEventListener('resize', handleResize);
+      try {
+        const c = map.getCenter();
+        lastCenterRef.current = [c.lat, c.lng];
+        lastZoomRef.current = map.getZoom();
+        map.remove();
+      } catch (err) {}
       mapRef.current = null;
       routeLayerRef.current = null;
       nearbyLayerRef.current = null;
     };
-  }, []);
+  }, [isExpanded, renderCanvas]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -748,18 +767,33 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const activeDetailedFlight = selectedFlight || activeFloatingFlight;
   const detailedAirline = activeDetailedFlight ? getAirlineInfo(activeDetailedFlight.callsign) : null;
 
-  return (
+  // The Map JSX Layout
+  const mapContent = (
     <div
       className={`relative w-full h-full bg-[#0b1220] overflow-hidden select-none ${
         isExpanded
-          ? 'fixed inset-0 z-[99999] w-screen h-screen flex flex-col md:flex-row bg-[#060913]'
-          : ''
+          ? 'fixed inset-0 z-[999999] w-screen h-screen flex flex-col md:flex-row bg-[#060913]'
+          : 'min-h-[360px]'
       }`}
+      style={
+        isExpanded
+          ? {
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              width: '100vw',
+              height: '100vh',
+              zIndex: 999999,
+            }
+          : undefined
+      }
     >
       {/* Main Map Canvas Area */}
       <div className="flex-1 h-full relative overflow-hidden flex flex-col min-w-0">
         {/* 2D Leaflet Map Container */}
-        <div ref={mapContainerRef} className="w-full h-full z-0 flex-1" />
+        <div ref={mapContainerRef} className="w-full h-full z-0 flex-1" style={{ width: '100%', height: '100%' }} />
 
         {/* Hardware-Accelerated Viewport Canvas Overlay */}
         <canvas
@@ -927,8 +961,8 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
             <button
               type="button"
               onClick={toggleFullscreen}
-              aria-label={isExpanded ? 'Exit full screen map' : 'Enlarge map to full screen of window'}
-              title={isExpanded ? 'Exit full screen (Esc)' : 'Enlarge map to full screen of window'}
+              aria-label={isExpanded ? 'Exit full screen map' : 'Enlarge map to full window'}
+              title={isExpanded ? 'Exit full screen (Esc)' : 'Enlarge map to full window'}
               className="bg-[#0b1220]/95 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-cyan-500/40 hover:border-cyan-400/70 backdrop-blur-xl px-3 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
             >
               <span className="text-sm leading-none">{isExpanded ? '🗗' : '⛶'}</span>
@@ -1458,4 +1492,20 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       )}
     </div>
   );
+
+  // If enlarged to full window, use React Portal to mount directly on document.body
+  // This completely escapes any parent CSS transform, overflow clips, or grid restrictions on any page!
+  if (isExpanded) {
+    return (
+      <>
+        {/* In-flow placeholder to maintain layout space when map is portaled */}
+        <div className="relative w-full h-full min-h-[360px] bg-[#070c18] rounded-xl border border-slate-800 flex items-center justify-center text-slate-500 font-mono text-xs">
+          <span>Map enlarged to full window (Press Esc or Exit Fullscreen to return)</span>
+        </div>
+        {createPortal(mapContent, document.body)}
+      </>
+    );
+  }
+
+  return mapContent;
 };
