@@ -226,7 +226,14 @@ export const useAirGuardStore = create<AirGuardState>((set) => ({
       if (f.id.toLowerCase() === icao24.toLowerCase() || f.callsign.toLowerCase() === icao24.toLowerCase()) {
         const status: 'normal' | 'suspicious' | 'critical' = score >= 0.8 ? 'critical' : score >= 0.65 ? 'suspicious' : 'normal';
         const trust = typeof score === 'number' && Number.isFinite(score) ? Math.round((1.0 - score) * 100) : Number.NaN;
-        return { ...f, trustScore: trust, trust_score: Number.isFinite(trust) ? trust : null, status, combined_risk_score: score };
+        return {
+          ...f,
+          trustScore: trust,
+          trust_score: Number.isFinite(trust) ? trust : null,
+          status,
+          combined_risk_score: score,
+          assessment_status: score >= 0.8 ? 'CRITICAL' : score >= 0.65 ? 'REVIEW_REQUIRED' : 'ASSESSED'
+        };
       }
       return f;
     });

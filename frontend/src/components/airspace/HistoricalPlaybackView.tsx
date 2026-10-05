@@ -80,24 +80,34 @@ const getAirlineName = (callsign?: string | null): string => {
   return airlines[prefix] || 'Commercial / General Aviation';
 };
 
-const asFlight = (state: HistoricalState, history: Array<{ lat: number; lng: number }>): Flight => ({
-  id: state.icao24,
-  callsign: state.callsign?.trim() || state.icao24.toUpperCase(),
-  lat: Number(state.latitude),
-  lng: Number(state.longitude),
-  altitude: Number.isFinite(state.altitude_m) ? Math.round((state.altitude_m as number) * 3.28084) : 0,
-  speed: Number.isFinite(state.velocity_ms) ? Math.round((state.velocity_ms as number) * 1.94384) : 0,
-  heading: Number.isFinite(state.heading_deg) ? (state.heading_deg as number) : 0,
-  verticalRate: state.vertical_rate_ms ?? undefined,
-  trustScore: Number.isFinite(state.trust_score) ? Math.round(state.trust_score as number) : Number.NaN,
-  combined_risk_score: displayableRisk(state.combined_risk_score, state.assessment_status),
-  status: detectorStatusFromRisk(state.combined_risk_score, state.assessment_status),
-  is_synthetic: false,
-  source: state.source ?? 'opensky_live',
-  staleness_status: 'RECORDED',
-  data_quality: state.data_quality,
-  history,
-});
+const asFlight = (state: HistoricalState, history: Array<{ lat: number; lng: number }>): Flight => {
+  const visibleRisk = displayableRisk(state.combined_risk_score, state.assessment_status);
+  const trustScore = Number.isFinite(state.trust_score)
+    ? Math.round(state.trust_score as number)
+    : (typeof visibleRisk === 'number' && Number.isFinite(visibleRisk) ? Math.round((1 - visibleRisk) * 100) : Number.NaN);
+  const status = detectorStatusFromRisk(visibleRisk, state.assessment_status);
+
+  return {
+    id: state.icao24,
+    callsign: state.callsign?.trim() || state.icao24.toUpperCase(),
+    lat: Number(state.latitude),
+    lng: Number(state.longitude),
+    altitude: Number.isFinite(state.altitude_m) ? Math.round((state.altitude_m as number) * 3.28084) : 0,
+    speed: Number.isFinite(state.velocity_ms) ? Math.round((state.velocity_ms as number) * 1.94384) : 0,
+    heading: Number.isFinite(state.heading_deg) ? (state.heading_deg as number) : 0,
+    verticalRate: state.vertical_rate_ms ?? undefined,
+    trustScore,
+    trust_score: Number.isFinite(trustScore) ? trustScore : null,
+    combined_risk_score: visibleRisk,
+    assessment_status: state.assessment_status,
+    status,
+    is_synthetic: false,
+    source: state.source ?? 'opensky_live',
+    staleness_status: 'RECORDED',
+    data_quality: state.data_quality,
+    history,
+  };
+};
 
 export const HistoricalPlaybackView: React.FC = () => {
   const [start, setStart] = useState(() => localDateTime(new Date(Date.now() - 6 * 60 * 60_000)));

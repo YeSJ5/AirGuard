@@ -1172,8 +1172,10 @@ export default function App() {
         const states = await acRes.json() as AircraftApiState[];
         if (Array.isArray(states)) {
           const mapped: Flight[] = states.filter((s) => !s.is_synthetic && s.source !== 'regional_fallback').map((s) => {
-              const calcTrust = s.trust_score !== undefined && s.trust_score !== null ? Math.round(s.trust_score) : Number.NaN;
               const visibleRisk = displayableRisk(s.combined_risk_score, s.assessment_status);
+              const calcTrust = s.trust_score !== undefined && s.trust_score !== null && Number.isFinite(s.trust_score)
+                ? Math.round(s.trust_score)
+                : (typeof visibleRisk === 'number' && Number.isFinite(visibleRisk) ? Math.round((1 - visibleRisk) * 100) : Number.NaN);
               const calcStatus = detectorStatusFromRisk(visibleRisk, s.assessment_status);
 
               return {
@@ -1185,6 +1187,7 @@ export default function App() {
                 speed: isObservedField(s.data_quality, 'velocity') ? Math.round(s.velocity_ms * 1.94384) : Number.NaN,
                 heading: isObservedField(s.data_quality, 'heading') ? Math.round(s.heading_deg) : Number.NaN,
                 trustScore: calcTrust,
+                trust_score: Number.isFinite(calcTrust) ? calcTrust : null,
                 combined_risk_score: visibleRisk,
                 assessment_status: s.assessment_status,
                 signalStrength: undefined,
@@ -1326,6 +1329,12 @@ export default function App() {
             durationSec: 8
           });
 
+          const visibleRisk = displayableRisk(s.combined_risk_score, s.assessment_status);
+          const calcTrust = s.trust_score !== undefined && s.trust_score !== null && Number.isFinite(s.trust_score)
+            ? Math.round(s.trust_score)
+            : (typeof visibleRisk === 'number' && Number.isFinite(visibleRisk) ? Math.round((1 - visibleRisk) * 100) : Number.NaN);
+          const calcStatus = detectorStatusFromRisk(visibleRisk, s.assessment_status);
+
           if (existing) {
             merged.push({
               ...existing,
@@ -1336,22 +1345,20 @@ export default function App() {
               speed,
               heading,
               verticalRate: isObservedField(s.data_quality, 'vertical_rate') ? s.vertical_rate_ms : existing.verticalRate,
+              trustScore: calcTrust,
+              trust_score: Number.isFinite(calcTrust) ? calcTrust : null,
+              combined_risk_score: visibleRisk,
+              assessment_status: s.assessment_status,
+              status: calcStatus,
               last_seen_seconds_ago: s.last_seen_seconds_ago ?? 0,
               staleness_status: s.staleness_status || 'LIVE',
               route: s.route || existing.route || 'Route unknown',
               source: s.source || existing.source || 'source_unavailable',
-              combined_risk_score: displayableRisk(s.combined_risk_score, s.assessment_status),
-              assessment_status: s.assessment_status,
-              status: detectorStatusFromRisk(displayableRisk(s.combined_risk_score, s.assessment_status), s.assessment_status),
               is_synthetic: Boolean(s.is_synthetic || s.source === 'regional_fallback'),
               data_quality: s.data_quality,
               squawk: s.squawk ?? existing.squawk
             });
           } else {
-            const calcTrust = s.trust_score !== undefined && s.trust_score !== null ? Math.round(s.trust_score) : Number.NaN;
-            const visibleRisk = displayableRisk(s.combined_risk_score, s.assessment_status);
-            const calcStatus = detectorStatusFromRisk(visibleRisk, s.assessment_status);
-
             merged.push({
               id: s.icao24,
               received_at: s.received_at,
@@ -1362,6 +1369,7 @@ export default function App() {
               heading,
               verticalRate: isObservedField(s.data_quality, 'vertical_rate') ? s.vertical_rate_ms : undefined,
               trustScore: calcTrust,
+              trust_score: Number.isFinite(calcTrust) ? calcTrust : null,
               combined_risk_score: visibleRisk,
               assessment_status: s.assessment_status,
               signalStrength: undefined,
