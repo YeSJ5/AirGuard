@@ -243,9 +243,9 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
   const [nearbyStatus, setNearbyStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [isNearbyOpen, setIsNearbyOpen] = useState<boolean>(false);
 
-  // Fullscreen & Right Sidebar state
+  // Fullscreen & Right Sidebar state (Sidebar is HIDDEN by default in fullscreen)
   const [isExpanded, setIsExpanded] = useState<boolean>(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
   const [sidebarSearch, setSidebarSearch] = useState<string>('');
   const [sidebarFilter, setSidebarFilter] = useState<'all' | 'suspicious' | 'critical'>('all');
 
@@ -477,12 +477,27 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
     };
   }, [isExpanded, isSidebarOpen, renderCanvas]);
 
+  // Fullscreen toggle handler
+  const toggleFullscreen = useCallback(() => {
+    setIsExpanded((prev) => {
+      const next = !prev;
+      if (next) {
+        // Enlarge to full screen: Keep sidebar hidden by default
+        setIsSidebarOpen(false);
+      } else {
+        setIsSidebarOpen(false);
+      }
+      return next;
+    });
+  }, []);
+
   // Handle ESC key to exit full screen mode
   useEffect(() => {
     if (!isExpanded) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsExpanded(false);
+        setIsSidebarOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -580,10 +595,15 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
       if (clicked) {
         onSelectFlightRef.current?.(clicked);
         setActiveFloatingFlight(clicked);
+        // Open right sidebar when clicking a flight
         setIsSidebarOpen(true);
       } else {
         const target = e.target as HTMLElement;
-        if (!target?.closest('.airguard-floating-card') && !target?.closest('.airguard-expanded-sidebar')) {
+        if (
+          !target?.closest('.airguard-floating-card') &&
+          !target?.closest('.airguard-expanded-sidebar') &&
+          !target?.closest('.airguard-sidebar-toggle-btn')
+        ) {
           setActiveFloatingFlight(null);
         }
       }
@@ -754,7 +774,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
             <button
               key={reg.name}
               onClick={() => zoomToRegion(reg.name, reg.lat, reg.lng, reg.zoom)}
-              className={`px-2.5 py-1.5 rounded-lg transition-all font-semibold whitespace-nowrap ${
+              className={`px-2.5 py-1.5 rounded-lg transition-all font-semibold whitespace-nowrap cursor-pointer ${
                 activeRegion === reg.name
                   ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40 shadow-[0_0_10px_rgba(6,182,212,0.25)]'
                   : 'text-slate-300 hover:bg-white/10'
@@ -766,7 +786,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           <span className="text-slate-700">|</span>
           <button
             onClick={centerAllFlights}
-            className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 transition-all font-semibold whitespace-nowrap flex items-center gap-1"
+            className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 transition-all font-semibold whitespace-nowrap flex items-center gap-1 cursor-pointer"
             title="Center map to encompass all detected aircraft"
           >
             <span>⤢</span>
@@ -848,7 +868,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
               </div>
               <button
                 onClick={() => setActiveFloatingFlight(null)}
-                className="text-slate-400 hover:text-white text-lg leading-none px-1 transition-colors"
+                className="text-slate-400 hover:text-white text-lg leading-none px-1 transition-colors cursor-pointer"
                 title="Close card"
               >
                 &times;
@@ -892,7 +912,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
               onClick={() => {
                 onOpenFlightDetails(activeFloatingFlight);
               }}
-              className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-900/30 transition-all flex items-center justify-center gap-1.5"
+              className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-900/30 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <span>Inspect Telemetry &amp; Detection Matrix</span>
               <span className="text-sm">→</span>
@@ -900,18 +920,15 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
           </div>
         )}
 
-        {/* Top-Right Control Toolbar: Fullscreen Toggle, Live Count, Follow Mode */}
+        {/* Top-Right Control Toolbar: Fullscreen Toggle, Live Count, Follow Mode, 3-Lines Button */}
         <div className="absolute top-4 right-3 sm:right-4 z-[450] flex flex-col items-end gap-2">
           <div className="flex items-center gap-2">
             {/* Fullscreen / Enlarge Map Button */}
             <button
               type="button"
-              onClick={() => {
-                setIsExpanded((prev) => !prev);
-                if (!isExpanded) setIsSidebarOpen(true);
-              }}
-              aria-label={isExpanded ? 'Exit full screen map' : 'Enlarge map to full screen'}
-              title={isExpanded ? 'Exit full screen (Esc)' : 'Enlarge map to full screen'}
+              onClick={toggleFullscreen}
+              aria-label={isExpanded ? 'Exit full screen map' : 'Enlarge map to full screen of window'}
+              title={isExpanded ? 'Exit full screen (Esc)' : 'Enlarge map to full screen of window'}
               className="bg-[#0b1220]/95 hover:bg-cyan-950/90 text-cyan-200 hover:text-white border border-cyan-500/40 hover:border-cyan-400/70 backdrop-blur-xl px-3 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5 cursor-pointer"
             >
               <span className="text-sm leading-none">{isExpanded ? '🗗' : '⛶'}</span>
@@ -927,16 +944,22 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
               </span>
             </div>
 
-            {/* Reopen Sidebar Button in Expanded Mode */}
+            {/* 3-Lines (Hamburger) Button in Fullscreen Mode (Shown when sidebar is hidden) */}
             {isExpanded && !isSidebarOpen && (
               <button
                 type="button"
                 onClick={() => setIsSidebarOpen(true)}
-                className="bg-cyan-600/90 hover:bg-cyan-500 text-white px-3 py-2 rounded-xl text-xs font-semibold shadow-xl transition-all flex items-center gap-1.5"
-                title="Open flight details sidebar"
+                aria-label="Open flight details sidebar"
+                title="View flight details & aircraft list (3 lines)"
+                className="airguard-sidebar-toggle-btn bg-cyan-600/90 hover:bg-cyan-500 text-white border border-cyan-400/60 px-3 py-2 rounded-xl text-xs font-semibold shadow-[0_0_15px_rgba(6,182,212,0.4)] backdrop-blur-xl flex items-center gap-2 cursor-pointer transition-all hover:scale-105"
               >
-                <span>◀</span>
-                <span>Flight Details</span>
+                {/* 3 Lines Icon */}
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="3" y1="6" x2="21" y2="6" />
+                  <line x1="3" y1="12" x2="21" y2="12" />
+                  <line x1="3" y1="18" x2="21" y2="18" />
+                </svg>
+                <span className="hidden sm:inline">Flight Details</span>
               </button>
             )}
           </div>
@@ -946,7 +969,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
               type="button"
               onClick={() => setFollowSelected((val) => !val)}
               aria-pressed={followSelected}
-              className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur-xl transition-all ${
+              className={`rounded-lg border px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur-xl transition-all cursor-pointer ${
                 followSelected
                   ? 'border-cyan-400/50 bg-cyan-950/90 text-cyan-200 shadow-[0_0_12px_rgba(6,182,212,0.3)]'
                   : 'border-white/10 bg-[#0b1220]/90 text-slate-300 hover:text-white'
@@ -1094,7 +1117,7 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
         </div>
       </div>
 
-      {/* Enlarged Map Right Sidebar (Flight Details & Target Matrix) */}
+      {/* Enlarged Map Right Sidebar (Appears ONLY on clicking 3 lines or clicking a flight) */}
       {isExpanded && isSidebarOpen && (
         <aside className="airguard-expanded-sidebar w-full md:w-[380px] lg:w-[420px] xl:w-[450px] shrink-0 h-full bg-[#081020]/98 border-t md:border-t-0 md:border-l border-cyan-500/20 backdrop-blur-2xl flex flex-col z-[460] shadow-2xl overflow-hidden animate-in slide-in-from-right duration-200 select-text">
           {/* Sidebar Header */}
@@ -1122,19 +1145,10 @@ export const AirspaceMap: React.FC<AirspaceMapProps> = ({
                 type="button"
                 onClick={() => setIsSidebarOpen(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors text-sm cursor-pointer"
-                title="Collapse sidebar"
-                aria-label="Collapse sidebar"
+                title="Hide sidebar (Click 3-lines button to reopen)"
+                aria-label="Hide sidebar"
               >
-                ▶
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsExpanded(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors text-sm cursor-pointer"
-                title="Exit Fullscreen (Esc)"
-                aria-label="Exit Fullscreen"
-              >
-                🗗
+                ✕
               </button>
             </div>
           </div>
